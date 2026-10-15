@@ -86,10 +86,12 @@ filename says V1.0 while its title block says V0.1; retain that source ambiguity
 
 ## Current display implementation
 
-Sources: [firmware implementation](../src/main.cpp) (`app` for the validation screen and diagnostics),
+Sources: [Arduino entrypoints](../src/main.cpp), [ReaderApp](../lib/reader/ReaderApp.cpp),
+[reader screens](../lib/ui/ReaderScreen.cpp),
 [Display](../lib/board/Display.cpp), [Touch](../lib/board/Touch.cpp), and
 [SdCard](../lib/board/SdCard.cpp) and [LVGL configuration](../include/lv_conf.h). Peripheral implementation lives in the three classes under `lib/board/`;
-`main.cpp` owns their instances and the UI. LVGL configuration and the C
+`ReaderApp` owns their instances and the reader lifecycle. See [reader usage and
+architecture](reader.md). LVGL configuration and the C
 assertion bridge declaration remain in headers because LVGL compiles separately.
 Arduino uses the native ESP-IDF `esp_lcd` RGB panel driver with LVGL 9.6.0
 software rendering. Arduino_GFX and the historical vendor LVGL copy are not
@@ -152,6 +154,8 @@ schematic symbols include additional grounded pads.
 | SRAM / PSRAM transfer alignment | 8 / 64 bytes |
 | Full RGB565 framebuffer | 800 x 480 x 2 = 768,000 bytes = 750 KiB, before driver overhead |
 | LVGL draw buffer | One 64-byte-aligned, internal 800 x 48 x 2-byte buffer: 76,800 bytes (75 KiB) |
+| Portrait rotation scratch | Additional 76,800-byte aligned internal buffer; absent for default landscape tests |
+| Reader page buffers | Displayed and staging 480×800 RGB565 buffers, 768,000 bytes each in PSRAM |
 | LVGL allocator | Builtin 65,536-byte heap (64 KiB), included in static RAM usage |
 | LVGL render mode / format | Partial / native RGB565, no byte swap or row padding |
 | LVGL service / refresh | Arduino loop approximately every 5 ms; 16 ms LVGL refresh period; no LVGL OS integration |
@@ -212,7 +216,7 @@ still checks showed an intact layout and moving progress bar without persistent
 row drift. This is verification of the current validation-screen workload,
 not continuous per-frame certification or a test with Wi-Fi/flash-write load.
 
-### LVGL port and validation screen
+### LVGL port and portrait reader
 
 `Display::begin()` holds backlight LOW, checks PSRAM, creates/resets/initializes
 the RGB panel, allocates the internal draw buffer, initializes LVGL, and registers
@@ -220,12 +224,17 @@ an 800 x 480 display. Allocation and SDK failures are reported over serial;
 initialization failures release acquired resources. LVGL assertions also disable
 backlight, print an error, and abort instead of silently hanging.
 
-The main sketch creates six RGB/white/black/gray swatches, three channel gradients,
-four corner labels, a one-pixel perimeter, uptime, and an endlessly reversing
-progress bar. The touch-enabled screen adds a tap-count button, coordinates,
-press/error counts, and an orange pointer marker. `Display::show()` forces the initial LVGL render, then waits for a
-scanout frame boundary before enabling backlight. Missing frame interrupts cause
-a reported failure after 250 ms; the backlight stays off.
+The application now boots into a 480×800 portrait SD browser, using a 90-degree
+LVGL display rotation with the board turned clockwise. The old validation
+patterns remain in the peripheral test fixtures. `Display::begin()` defaults to
+landscape for those existing tests. Portrait flushes rotate both the packed
+RGB565 pixels and rectangle into native 800×480 coordinates before the SDK copy.
+`Touch::state()` returns portrait coordinates; the LVGL input callback supplies
+native coordinates so LVGL applies rotation exactly once.
+
+`Display::show()` forces the initial LVGL render, then waits for a scanout frame
+boundary before enabling backlight. Missing frame interrupts cause a reported
+failure after 250 ms; the backlight stays off.
 
 LVGL uses `millis()` for ticks; all UI calls run on the Arduino task. The flush
 callback converts inclusive LVGL ends to exclusive SDK ends (`x2 + 1`, `y2 + 1`).
@@ -241,7 +250,8 @@ free internal RAM, largest internal allocation block, and total/free PSRAM.
 Static build RAM includes the 64 KiB LVGL heap; the 75 KiB draw buffer and
 driver DMA/interrupt resources allocate at runtime. The 750 KiB RGB framebuffer
 resides in PSRAM. Allow additional room for task stacks, driver overhead, and
-future UI objects/layers rather than treating this as the entire memory budget.
+UI objects/layers, portrait rotation scratch, the PSRAM page index and codec
+workspaces rather than treating this as the entire memory budget.
 
 ### Corrections from the earlier demo
 
@@ -365,8 +375,10 @@ does not prove SD operation. This evidence describes SPI mode, not an SDMMC pino
 ### Current SD implementation
 
 The [SdCard class](../lib/board/SdCard.cpp) initializes Arduino's
-built-in `SPI` and `SD` libraries on CS10/MOSI11/SCK12/MISO13 at 1 MHz.
-This wiring and clock are project-configured from the vendor example;
+built-in `SPI` and `SD` libraries on CS10/MOSI11/SCK12/MISO13. Its default
+frequency is 1 MHz; the reader explicitly requests the validated 16 MHz setting
+in `include/reader_config.h`. This wiring and original 1 MHz baseline come from
+the vendor example;
 mount/read/write/remove were hardware-verified on 2026-10-16 after an initial
 mount failure (see the class/test session below). It does not change display timing or touch configuration.
 GPIO11-13 remain shared with P2 and the optional resistive-touch alternative;
@@ -375,17 +387,20 @@ do not attach an independently driven bus to those contacts.
 Insert a FAT16/FAT32-formatted card before power-on/reset. Boot attempts one
 mount at `/sd` with formatting disabled, checks that the root directory opens,
 and logs card type/capacity plus up to 16 root entries without recursion.
-The validation screen displays the mount result. Missing cards, unsupported
+The browser displays an unavailable/empty/error state. Missing cards, unsupported
 filesystems, and mount/root-open failures release the SD/SPI resources and
 leave the display and capacitive touch usable. Boot diagnostics read directory
-metadata only; they do not create, overwrite, or delete files.
+metadata only. Opening a CBZ writes extracted pages and statistics in the
+reader-owned SD directory, as described in [reader storage](reader.md#cache-and-progress).
 
 After successful initialization, application code on the Arduino task can use
 the `SdCard::open("/filename", FILE_READ)` or `FILE_WRITE` APIs and must
 check open/read/write results and close files. Arduino SD paths are relative
 to the card root; `/sd` is the VFS mount point. No new dependency or internal
-flash partition is required for this external filesystem. File writes are exercised only by the opt-in hardware tests; LVGL
-filesystem/image integration is not part of this boot demonstration.
+flash partition is required for this external filesystem. The class also exposes
+checked directory creation/removal, rename, free-space reporting and an explicit
+1–16 MHz frequency argument. The reader streams archive/image files through
+Arduino File adapters and publishes a display-sized LVGL RGB565 image on success.
 
 There is no wired card-detect input or hot-plug service. The status is a boot
 snapshot; power off before swapping cards and reboot to remount. Physical
@@ -540,10 +555,11 @@ successfully with the listed stack. The user authorized hardware iteration;
 the current 16 MHz image was uploaded through CH340C and verified by esptool.
 Serial was read at 115200, and camera-window recordings were captured without audio.
 Boot traces still show the known missing NVS/otadata/core-dump partition warnings
-from the existing app-only table. This display fix did not change partitioning
-or validate persistence/OTA.
+from the existing app-only table. The reader keeps this partition table and persists cache/statistics on SD.
+These known boot warnings do not indicate a reader-statistics failure; internal
+NVS persistence and OTA remain unavailable.
 
-## Class extraction and repeatable tests (2026-10-16)
+## Earlier class extraction and repeatable tests (2026-10-16)
 
 Peripheral implementation is now shared between the demo and PlatformIO Unity
 suites through `Display`, `Touch`, and `SdCard` under `lib/board/`. Resource state
@@ -629,6 +645,118 @@ Local `.pio/peripheral-validation.json` indexes reports and built-image hashes.
 Local JSON/JUnit reports and raw serial logs are retained under ignored `.pio/`
 artifacts; they are not bundled vendor references or committed test evidence.
 A report's skipped/ignored cases must not be treated as successful verification.
+
+## Portrait CBZ reader validation (2026-10-16)
+
+Current source architecture and limits are documented in [reader.md](reader.md).
+Board port: `/dev/cu.usbserial-214220`, CH340C, UART 115200. The fitted card reports
+SDHC/SDXC, 14,910 MiB; it is the working FAT card from the earlier session.
+No formatting was performed for this reader work. RGB timing, pins, flash/PSRAM
+configuration and the app-only partition table are unchanged. Native and existing
+hardware environments remain available.
+
+Native regression: **29 tests passed** across display, touch, SD and reader.
+The actual pinned LVGL, ZIP/JPEG/PNG implementations run against fake hardware.
+Coverage includes portrait flush pixels/bounds and pointer rotation, directory
+pagination, cache ownership, malformed/CRC archives, cancellation, allocation
+and I/O failures, baseline JPEG and 4096-wide PNG, rejected progressive/interlaced/
+oversized/corrupt images, statistics backup/temporary recovery, multi-book
+resume, preserved progress after panel-copy failure, failed-page skipping and
+visible save-failure warnings. Reports: `.pio/reader-native.json` and `.xml` (local ignored artifacts).
+All seven original embedded suites compiled without upload; compile-only
+PlatformIO results say SKIPPED and do not represent new physical passes.
+
+SD benchmark firmware built `Oct 16 2026 01:30:39`; each speed ran at least
+20 seconds of deterministic 32 KiB write/close/reopen/read/remove cycles with
+portrait gradients, borders, animation and active touch. Reported throughput
+includes filesystem overhead and UI yields, rather than raw SPI bandwidth.
+
+| SD clock | Integrity cycles | Combined KiB/s | Scanout Hz | Touch errors |
+| --- | ---: | ---: | ---: | ---: |
+| 1 MHz | 23 | 72.3 | 28.84 | 0 |
+| 4 MHz | 55 | 175.6 | 28.83 | 0 |
+| 8 MHz | 77 | 244.3 | 28.80 | 0 |
+| 16 MHz | 91 | 290.9 | 28.82 | 0 |
+
+All settings passed integrity, with stable reported internal memory
+134,908–134,920 bytes and PSRAM 7,590,859 bytes. The operator confirmed all four
+settings were visually stable and touch responded. **16 MHz SD was selected for
+the reader**, while `SdCard::begin()` retains its 1 MHz default. This result
+applies to the connected board/card; different cards may require retesting or a
+lower configured speed. RGB remained 16 MHz throughout.
+
+The guided portrait suite passed all four inset corners and center with actual
+press/release input. Targets: (35,35), (444,35), (35,764), (444,764), (240,400).
+Touch errors remained zero. Firmware built `Oct 16 2026 01:33:16`.
+Local reports: `.pio/reader-benchmark.*` and `.pio/reader-guided.*`.
+
+An initial 1 MHz reader run completed 20 page turns in one minute with stable
+memory, zero touch errors and approximately 28.8 Hz scanout. The operator
+confirmed pages were upright and complete with stable colors and all four
+borders. That run failed a newly introduced, overly strict 40-turn throughput
+assertion, rather than an integrity check; the portable minimum is now ten
+turns, with actual throughput reported. A collector restart also interrupted an
+earlier attempt; after resetting during active SD work, one mount failed. The
+operator power-cycled with the card inserted before continuing. Neither attempt
+is recorded as a completed passing Unity run.
+
+The final selected-speed integration test **passed**: extraction of generated
+JPEG/PNG comics, sorted pages and pixel colors, separate-book completion,
+cancellation cleanup, reopening, application restart/resume, then a one-minute
+workload. It completed **54 page turns**, **28.82 Hz** scanout, **zero touch
+errors**, stable free internal memory **136,412 → 136,412 bytes**, and free PSRAM
+**4,924,311 bytes**. Each turn includes verified progress writes, so the workload
+exercises both reads and writes. An earlier successful 16 MHz run completed 59
+turns before presentation-confirmed progress saving was added. The final run
+includes that safeguard and full UTF-8 browser names. Local report:
+`.pio/reader-hardware.json`/`.xml`; total suite time 105.17 seconds includes setup,
+extraction and resume checks outside the one-minute soak.
+
+Synthetic manual-test books were provisioned under `/Reader samples/`, with an
+ownership marker. These are intentionally retained so controls and physical
+power-cycle resume can be tested with identical paths/fingerprints. The folder
+includes `Numbered.cbz` (red/green/blue in natural order), `Second.cbz`,
+`Corrupt page.cbz`, `Long book.cbz` (100 pages, for Cancel), and `Unsupported.cbr`.
+Existing files are never overwritten: the provisioner verifies its marker and
+bytewise contents before reuse. Interrupted earlier `/reader-test-*` fixtures
+were removed only after confirming their entire contents matched the two known
+synthetic books. Sample provisioning passed its own Unity suite; local report
+`.pio/reader-samples.*`.
+
+The operator confirmed the production reader's folder/file browser, natural
+red → green → blue page ordering, left/right turns, center overlay toggle, Back,
+reopen at saved page, independent progress across `Numbered.cbz`/`Second.cbz`,
+and Stats. They also confirmed Cancel during `Long book.cbz` extraction, the
+CBR “coming later” message, and the corrupt-page error followed by a successful
+skip to the next green page. Pages were upright and stable. These are operator
+observations, separate from Unity assertions.
+
+For the physical power-cycle check, the operator left `Numbered.cbz` on green
+page 2/3, waited two seconds, disconnected/reconnected power with the card
+inserted, observed a browser boot, then reopened the book. **Page 2 and its
+statistics were retained.** This establishes SD persistence across a real
+power cycle, in addition to the application's restart test.
+
+Production firmware was restored through the selected CH340C port and esptool
+verified the flashed hash. Build identity: `Oct 16 2026 01:41:43`, LVGL 9.6.0,
+91,940 bytes static RAM and 868,981 bytes application flash. SHA-256 of
+`.pio/build/esp32-s3-devkitc-1/firmware.bin`:
+`8b5cddfc3b80fbf5d32312740939a5cc3680feadab66bce6ec963cffa2690082`.
+Normal boot identified GT911 at 0x5D, mounted SD at 16 MHz, and opened the
+portrait browser. Idle telemetry showed 28.78–28.98 Hz scanout, 137,760 bytes
+free internal memory, 7,590,859 bytes free PSRAM and zero touch errors.
+
+Remaining limits: CBR/RAR is deferred; progressive JPEG, interlaced PNG and
+16-bit-per-channel PNG are unsupported. The sample images exercise the decoder
+pipeline but do not establish compatibility/performance for every real comic.
+Maximum dimensions are covered by bounded decoder logic and native width tests;
+a separate full-size 4096×8192 real-book hardware session was not performed.
+The earlier unsupported-filesystem card fixture remains unverified because the
+operator does not have a known fixture. No audio, wireless, OTA or internal NVS
+feature was added. Known missing NVS/otadata/core-dump warnings still come from the
+unchanged partition table. Expected attempts to load absent first-use progress
+records can produce Arduino VFS “does not exist” diagnostics; these are distinct
+from failed SD transactions or reported reader save errors.
 
 ## Future physical verification checklist
 

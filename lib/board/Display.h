@@ -16,7 +16,7 @@ public:
     ~Display() { end(); }
     Display(const Display &) = delete;
     Display &operator=(const Display &) = delete;
-    bool begin(); // Idempotent while healthy; retry after failure releases old resources.
+    bool begin(lv_display_rotation_t rotation = LV_DISPLAY_ROTATION_0); // Idempotent while healthy; retry after failure releases old resources.
     void end();
     bool show();
     bool healthy();
@@ -28,6 +28,7 @@ private:
     esp_lcd_panel_handle_t panel = nullptr;
     lv_display_t *lv_display = nullptr;
     void *draw_buffer = nullptr;
+    void *rotation_buffer = nullptr;
     bool failed = false, flushed = false;
     volatile uint32_t frames = 0;
     portMUX_TYPE frame_mux = portMUX_INITIALIZER_UNLOCKED;

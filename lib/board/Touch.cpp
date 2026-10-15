@@ -238,7 +238,14 @@ bool Touch::begin(lv_display_t *display)
 
 Touch::State Touch::state() const
 {
-    return current;
+    State result = current;
+    if (attached_display) {
+        lv_point_t point = {current.x, current.y};
+        lv_display_rotate_point(attached_display, &point);
+        result.x = point.x;
+        result.y = point.y;
+    }
+    return result;
 }
 
 Touch *Touch::owner = nullptr;

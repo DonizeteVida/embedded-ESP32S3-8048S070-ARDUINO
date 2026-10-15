@@ -60,8 +60,15 @@ static void stale_release_and_wraparound() {
     fake::now+=1; poll(); TEST_ASSERT_FALSE(touch.state().pressed); TEST_ASSERT_EQUAL(0,touch.state().errors);
     fake::report({{1,20,30}}); poll(); fake::wire_short=true; poll(); TEST_ASSERT_FALSE(touch.state().pressed);
 }
+static void portrait_state_and_lvgl_pointer_rotate_once() {
+    display.end();TEST_ASSERT_TRUE(display.begin(LV_DISPLAY_ROTATION_90));TEST_ASSERT_TRUE(touch.begin(display.handle()));
+    fake::report({{1,0,479}});poll();auto state=touch.state();TEST_ASSERT_EQUAL(0,state.x);TEST_ASSERT_EQUAL(0,state.y);
+    lv_point_t point;lv_indev_get_point(lv_indev_get_next(nullptr),&point);TEST_ASSERT_EQUAL(0,point.x);TEST_ASSERT_EQUAL(0,point.y);
+    fake::report({{1,799,0}});poll();state=touch.state();TEST_ASSERT_EQUAL(479,state.x);TEST_ASSERT_EQUAL(799,state.y);
+    lv_indev_get_point(lv_indev_get_next(nullptr),&point);TEST_ASSERT_EQUAL(479,point.x);TEST_ASSERT_EQUAL(799,point.y);
+}
 int main() {
-    UNITY_BEGIN(); RUN_TEST(detection_and_lifecycle); RUN_TEST(fallback_and_invalid_configuration);
+    UNITY_BEGIN(); RUN_TEST(portrait_state_and_lvgl_pointer_rotate_once);RUN_TEST(detection_and_lifecycle); RUN_TEST(fallback_and_invalid_configuration);
     RUN_TEST(initialization_bus_and_product_errors); RUN_TEST(mapping_tracking_and_release);
     RUN_TEST(malformed_reports_release_and_acknowledge); RUN_TEST(stale_release_and_wraparound);
     return UNITY_END();

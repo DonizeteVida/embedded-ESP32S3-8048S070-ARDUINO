@@ -10,12 +10,16 @@ shared pins, and open questions.
 
 ## Project layout
 
-- `src/main.cpp`: validation UI, diagnostics, and application lifecycle. Global
-  Arduino `setup()`/`loop()` delegate to `app`, which owns the peripheral instances.
+- `src/main.cpp`: initialization and service delegation to `reader::ReaderApp`.
+- `lib/reader/`: browsing, CBZ extraction, JPEG/PNG adapters, page decoding,
+  recoverable statistics and application/session control.
+- `lib/ui/`: LVGL reader/browser screens and queued events. See
+  [docs/reader.md](docs/reader.md) for controls, file limits and cache ownership.
 - `lib/board/`: non-copyable `Display`, `Touch`, and `SdCard` classes. These own
   peripheral state and resources; ESP-IDF/LVGL callback user data routes to the
   owning instance. One instance may own each physical peripheral at a time.
-  `begin()` is idempotent while initialized; `end()` is explicit and idempotent.
+  `begin()` is idempotent for the same rotation/SD frequency; changing either
+  requires `end()` first. `end()` is explicit and idempotent.
   Delete touch input before ending/retrying its display, close SD files before
   unmounting, and remove application timers referencing UI objects before display
   deletion. LVGL initialization stays global and one-time.
@@ -47,6 +51,9 @@ shared pins, and open questions.
 - LVGL calls belong on the Arduino loop task. The RGB ISR only counts frames;
   flush completion follows the synchronous framebuffer copy, not VSYNC.
   Preserve tightly packed RGB565 rows and inclusive-to-exclusive area conversion.
+  Reader rotation is 90 degrees; existing tests default to landscape. Rotate
+  partial flush pixels and rectangles together. LVGL rotates native pointer
+  callback coordinates once; `Touch::state()` reports displayed coordinates.
 - GT911 uses Wire on SDA19/SCL20 at 100 kHz and LVGL polling every 16 ms.
   Probe 0x5D/0x14 without rewriting controller configuration. Fallback reset
   uses GPIO38 and briefly drives GPIO18, then returns GPIO18 to input; do not
@@ -64,7 +71,11 @@ shared pins, and open questions.
 - Record whether a fact is confirmed by code, vendor documentation, or testing
   on the physical board. Do not claim a successful build proves hardware works.
 - The current partition table has no NVS, filesystem, or complete OTA layout.
-  Revisit it explicitly when a feature needs persistence or OTA.
+  Reader persistence is on SD under `/.comic-reader/stats/`; cache cleanup must
+  only touch the marked `/.comic-reader/cache/`. Never format a card. Keep SD
+  at the validated frequency in `include/reader_config.h`; higher clocks need
+  integrity, touch and visual evidence with RGB fixed at 16 MHz. Revisit the
+  partition table explicitly if internal persistence or OTA is introduced.
 
 ## Build and validation
 
@@ -84,6 +95,10 @@ Use validation appropriate to the change: review links and factual consistency
 for documentation; build for firmware/configuration changes, plus relevant
 tests: `pio test -e native`, plus compile all hardware suites with
 `pio test -e hardware -e hardware-guided -e hardware-soak -e hardware-card-absent -e hardware-card-unsupported --without-uploading --without-testing`.
+Reader environments add `hardware-reader`, `hardware-reader-guided` and
+`hardware-reader-benchmark`; compile those too when their code changes.
+`hardware-reader-samples` is an opt-in, ownership-checked synthetic-book provisioner;
+it intentionally retains its marked sample folder for physical resume tests.
 Hardware environments use Unity at 115200 baud, exclude application sources,
 and provide their own entrypoints. Guided/soak/card-fixture suites are opt-in.
 Flashing and device actions require a task that authorizes them; do not upload automatically

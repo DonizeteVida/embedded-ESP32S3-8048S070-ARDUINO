@@ -77,8 +77,21 @@ static void copy_failure_and_missing_interrupt() {
     uint32_t start=millis(); TEST_ASSERT_FALSE(display.show()); TEST_ASSERT_GREATER_OR_EQUAL(250,millis()-start);
     TEST_ASSERT_FALSE(display.healthy()); TEST_ASSERT_EQUAL(LOW,fake::pins[2]);
 }
+static void portrait_rotation_pixels_bounds_and_rendering() {
+    TEST_ASSERT_TRUE(display.begin(LV_DISPLAY_ROTATION_90));
+    auto *h=display.handle();TEST_ASSERT_EQUAL(480,lv_display_get_horizontal_resolution(h));TEST_ASSERT_EQUAL(800,lv_display_get_vertical_resolution(h));
+    lv_area_t area={0,0,1,2};uint16_t pixels[]={1,2,3,4,5,6};h->flushing=1;
+    h->flush_cb(h,&area,reinterpret_cast<uint8_t *>(pixels));
+    TEST_ASSERT_EQUAL(0,h->flushing);
+    const uint16_t top[]={2,4,6},bottom[]={1,3,5};
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(top,&fake::framebuffer[478*800],3);
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(bottom,&fake::framebuffer[479*800],3);
+    auto *screen=lv_display_get_screen_active(h);lv_obj_set_style_bg_color(screen,lv_color_hex(0x00ff00),0);
+    TEST_ASSERT_TRUE(display.show());TEST_ASSERT_EQUAL_HEX16(0x07e0,fake::framebuffer[240*800+400]);
+    area={0,0,480,0};h->flushing=1;h->flush_cb(h,&area,reinterpret_cast<uint8_t *>(pixels));TEST_ASSERT_EQUAL(0,h->flushing);TEST_ASSERT_FALSE(display.healthy());
+}
 int main() {
-    UNITY_BEGIN(); RUN_TEST(config_and_lifecycle); RUN_TEST(initialization_failures);
+    UNITY_BEGIN(); RUN_TEST(portrait_rotation_pixels_bounds_and_rendering); RUN_TEST(config_and_lifecycle); RUN_TEST(initialization_failures);
     RUN_TEST(rendered_rgb565_and_edges); RUN_TEST(flush_pixel_bounds_and_errors); RUN_TEST(copy_failure_and_missing_interrupt);
     return UNITY_END();
 }

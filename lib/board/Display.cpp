@@ -40,7 +40,26 @@ bool IRAM_ATTR Display::frame_done(esp_lcd_panel_handle_t, esp_lcd_rgb_panel_eve
 void Display::flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
     auto &self = *static_cast<Display *>(lv_display_get_user_data(display));
-    self.copy(area, pixels);
+    lv_area_t native = *area;
+    const auto rotation = lv_display_get_rotation(display);
+    const int width = lv_display_get_horizontal_resolution(display);
+    const int height = lv_display_get_vertical_resolution(display);
+    if (area->x1 < 0 || area->y1 < 0 || area->x2 >= width || area->y2 >= height ||
+        area->x1 > area->x2 || area->y1 > area->y2) {
+        self.fail("invalid logical LVGL flush rectangle", ESP_ERR_INVALID_ARG);
+    } else if (rotation != LV_DISPLAY_ROTATION_0 && !self.failed) {
+        const int w = lv_area_get_width(area), h = lv_area_get_height(area);
+        if (size_t(w) * h * 2 > kDrawBufferBytes) {
+            self.fail("rotation buffer overflow", ESP_ERR_INVALID_ARG);
+        } else {
+            lv_display_rotate_area(display, &native);
+            lv_draw_sw_rotate(pixels, self.rotation_buffer, w, h, w * 2,
+                              lv_area_get_width(&native) * 2, rotation, LV_COLOR_FORMAT_RGB565);
+            self.copy(&native, static_cast<uint8_t *>(self.rotation_buffer));
+        }
+    } else {
+        self.copy(&native, pixels);
+    }
     // Release exactly once, including errors. VSYNC does not own this buffer.
     lv_display_flush_ready(display);
 }
@@ -75,9 +94,10 @@ static void lvgl_log(lv_log_level_t, const char *message)
     Serial.print(message);
 }
 
-bool Display::begin()
+bool Display::begin(lv_display_rotation_t rotation)
 {
-    if (healthy()) return true;
+    if (healthy()) return lv_display_get_rotation(lv_display) == rotation;
+    if (rotation < LV_DISPLAY_ROTATION_0 || rotation > LV_DISPLAY_ROTATION_270) return false;
     if (owner != nullptr && owner != this) return false;
     end();
     owner = this;
@@ -144,6 +164,11 @@ bool Display::begin()
     if (draw_buffer == nullptr) {
         return abort_initialization("allocate LVGL internal draw buffer", ESP_ERR_NO_MEM);
     }
+    if (rotation != LV_DISPLAY_ROTATION_0) {
+        rotation_buffer = heap_caps_aligned_calloc(
+            64, 1, kDrawBufferBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!rotation_buffer) return abort_initialization("allocate rotation buffer", ESP_ERR_NO_MEM);
+    }
     if (!lv_is_initialized()) lv_init();
     lv_log_register_print_cb(lvgl_log);
     lv_tick_set_cb(tick_ms);
@@ -151,6 +176,7 @@ bool Display::begin()
     if (lv_display == nullptr) {
         return abort_initialization("create LVGL display", ESP_ERR_NO_MEM);
     }
+    lv_display_set_rotation(lv_display, rotation);
     lv_display_set_color_format(lv_display, LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(lv_display, draw_buffer, nullptr, kDrawBufferBytes,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
@@ -228,6 +254,8 @@ void Display::end()
     panel = nullptr;
     heap_caps_free(draw_buffer);
     draw_buffer = nullptr;
+    heap_caps_free(rotation_buffer);
+    rotation_buffer = nullptr;
     flushed = false;
     owner = nullptr;
 }

@@ -97,7 +97,7 @@ reports. Guided touch coordinates do not substitute for visual display checks.
 Automatic display tests turn off the backlight during cleanup after five seconds;
 the soak offers the longer viewing opportunity.
 
-Restore the regular demo after the session:
+Restore the production portrait reader after the session:
 
 ```sh
 pio run -e esp32-s3-devkitc-1 -t upload --upload-port <port>
@@ -107,3 +107,43 @@ pio device monitor -e esp32-s3-devkitc-1 --port <port> -b 115200
 Record firmware build identity, port, board revision/power source when known,
 card/filesystem, test reports and manual observations in `docs/hardware.md`.
 A compiled suite is not a hardware pass, and ignored tests remain pending.
+
+## Portrait reader tests
+
+See [reader documentation](../docs/reader.md) for implementation and controls.
+Native tests additionally run real pinned ZIP/JPEG/PNG codecs, ownership and
+partial-cache cleanup, natural ordering, malformed/CRC failures, 4096-wide PNG,
+image fitting, portrait flush pixels/bounds, single touch rotation, statistics
+recovery, and multiple-book resume. Synthetic CBZ fixtures live in `fixtures/`.
+
+```sh
+pio test -e hardware-reader -e hardware-reader-guided -e hardware-reader-benchmark --without-uploading --without-testing
+pio test -e hardware-reader -v --upload-port <port> --test-port <port> --json-output-path .pio/reader-hardware.json --junit-output-path .pio/reader-hardware.xml
+pio test -e hardware-reader-guided -v --upload-port <port> --test-port <port>
+pio test -e hardware-reader-benchmark -v --upload-port <port> --test-port <port>
+```
+
+`hardware-reader` checks generated comics, cancellation, JPEG/PNG pixel colors,
+multiple books, application restart/resume and a one-minute page-turn workload.
+The complete suite takes longer than one minute because setup/extraction and
+resume checks precede the soak. `-v` displays serial health/progress telemetry;
+without it PlatformIO can remain quiet until a Unity assertion or final result.
+Do not interrupt a healthy run solely because it is quiet. Its uniquely named
+fixture folder is deleted on cleanup; an interrupted run may leave it behind.
+
+`hardware-reader-guided` verifies five displayed portrait targets with 30-second
+press/release windows. `hardware-reader-benchmark` exercises 1/4/8/16 MHz SD with
+portrait scanout, animation and touch, 20 seconds per speed. Individual faster
+clock failures are logged as rejected settings; 1 MHz failure fails the suite.
+A software pass requires a separate visual verdict before selecting a clock.
+The one-minute reader run then verifies the selected frequency in real decoding.
+Physical power-cycle resume and manual browser/page/overlay/Cancel controls
+remain separate checks from queued integration commands.
+
+`hardware-reader-samples` is an opt-in provisioner for manual validation. It
+verifies ownership/content before reusing `/Reader samples/`, writes only missing
+synthetic sample files, and intentionally retains them for physical reboot tests.
+Its live loop runs the reader after Unity completes. Restore normal production
+firmware before final manual/power-cycle checks. It can also remove abandoned
+`/reader-test-*` folders only after confirming every entry and all bytes match the
+two generated fixture books; unknown or partial contents remain untouched.

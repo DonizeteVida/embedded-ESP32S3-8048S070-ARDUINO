@@ -31,4 +31,17 @@ static void checked_files_and_failures() {
     file=card.open("/test",FILE_WRITE); fake::write_error=true; TEST_ASSERT_EQUAL(0,file.write(bytes,4)); file.close();
     fake::remove_error=true; TEST_ASSERT_FALSE(card.remove("/test")); fake::remove_error=false; TEST_ASSERT_TRUE(card.remove("/test")); TEST_ASSERT_FALSE(card.exists("/test"));
 }
-int main() { UNITY_BEGIN(); RUN_TEST(mount_and_lifecycle); RUN_TEST(mount_failures_and_retry); RUN_TEST(checked_files_and_failures); return UNITY_END(); }
+static void directories_space_rename_and_clock() {
+    TEST_ASSERT_EQUAL(0,card.total_bytes());TEST_ASSERT_FALSE(card.mkdir("/books"));
+    TEST_ASSERT_FALSE(card.begin(999999));TEST_ASSERT_FALSE(card.begin(16000001));
+    TEST_ASSERT_TRUE(card.begin(16000000));TEST_ASSERT_EQUAL(16000000,fake::sd_frequency);
+    TEST_ASSERT_TRUE(card.begin(16000000));TEST_ASSERT_FALSE(card.begin(1000000));
+    TEST_ASSERT_TRUE(card.mkdir("/books"));TEST_ASSERT_FALSE(card.mkdir(nullptr));
+    file=card.open("/books/a",FILE_WRITE);uint8_t bytes[]={1,2,3};TEST_ASSERT_EQUAL(3,file.write(bytes,3));file.close();
+    TEST_ASSERT_EQUAL(card.total_bytes()-3,card.free_bytes());TEST_ASSERT_FALSE(card.rmdir("/books"));
+    TEST_ASSERT_TRUE(card.rename("/books/a","/books/b"));TEST_ASSERT_FALSE(card.exists("/books/a"));
+    TEST_ASSERT_TRUE(card.exists("/books/b"));TEST_ASSERT_FALSE(card.rename(nullptr,"/books/c"));
+    TEST_ASSERT_TRUE(card.remove("/books/b"));TEST_ASSERT_TRUE(card.rmdir("/books"));
+    card.end();TEST_ASSERT_TRUE(card.begin());TEST_ASSERT_EQUAL(1000000,card.frequency());TEST_ASSERT_FALSE(fake::format_requested);
+}
+int main() { UNITY_BEGIN(); RUN_TEST(mount_and_lifecycle); RUN_TEST(mount_failures_and_retry); RUN_TEST(checked_files_and_failures); RUN_TEST(directories_space_rename_and_clock); return UNITY_END(); }
