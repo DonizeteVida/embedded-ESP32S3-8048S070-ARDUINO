@@ -10,17 +10,23 @@ shared pins, and open questions.
 
 ## Project layout
 
-- `src/main.cpp`: all application implementation. The `display` namespace owns
-  native ESP-IDF `esp_lcd` RGB configuration, LVGL registration, backlight
-  sequencing, and the frame counter; `touch` owns GT911 I2C and LVGL pointer
-  input; `app` owns the validation UI, diagnostics, and lifecycle. Global Arduino `setup()`/`loop()` delegate to `app`.
+- `src/main.cpp`: validation UI, diagnostics, and application lifecycle. Global
+  Arduino `setup()`/`loop()` delegate to `app`, which owns the peripheral instances.
+- `lib/board/`: non-copyable `Display`, `Touch`, and `SdCard` classes. These own
+  peripheral state and resources; ESP-IDF/LVGL callback user data routes to the
+  owning instance. One instance may own each physical peripheral at a time.
+  `begin()` is idempotent while initialized; `end()` is explicit and idempotent.
+  Delete touch input before ending/retrying its display, close SD files before
+  unmounting, and remove application timers referencing UI objects before display
+  deletion. LVGL initialization stays global and one-time.
 - `include/lv_conf.h`, `include/lv_assert_handler.h`: LVGL 9.6 configuration
   and the C assertion bridge declaration used by LVGL library sources. The
-  assertion implementation stays in `main.cpp`; it logs, disables backlight,
-  and aborts. Keep these configuration headers separate for LVGL compilation.
+  assertion implementation is in `Display.cpp`; it logs, disables backlight,
+  and aborts. Keep configuration headers separate for LVGL compilation.
 - `platformio.ini`: environment, flash, PSRAM, USB, and serial settings.
 - `full_16mb.csv`: current single application partition layout.
-- `lib/`, `test/`: currently contain PlatformIO placeholder READMEs.
+- `test/`: native and on-device Unity suites; see [test/README.md](test/README.md)
+  for environments, fixture requirements, report export, and restoration commands.
 - `docs/hardware.md`: hardware reference, current firmware baseline, and test matrix.
 - `docs/reference/`: vendor files and SDK header snapshots cited by the guide;
   reference material only, outside the firmware build.
@@ -47,7 +53,7 @@ shared pins, and open questions.
   combine this with audio LRCLK. Native USB also shares SDA/SCL. Keep all I2C
   and LVGL input work on the Arduino task. Preserve checked reads, bounded
   contact counts, explicit release handling, and the 150 ms stale-press timeout.
-  Touch orientation settings live in `touch` and require physical corner tests.
+  Touch orientation settings live in `Touch` and require physical corner tests.
 - Check pin ownership and shared buses in the hardware reference before adding
   touch, SD, audio, I²C, or connector features. A GPIO exposed on a connector is
   not necessarily free. Distinguish the actual board variant from alternatives
@@ -76,8 +82,11 @@ with `--upload-port <port>` for upload or `--port <port>` for monitoring.
 
 Use validation appropriate to the change: review links and factual consistency
 for documentation; build for firmware/configuration changes, plus relevant
-tests where available. There are currently no project tests. Flashing and
-device actions require a task that authorizes them; do not upload automatically
+tests: `pio test -e native`, plus compile all hardware suites with
+`pio test -e hardware -e hardware-guided -e hardware-soak -e hardware-card-absent -e hardware-card-unsupported --without-uploading --without-testing`.
+Hardware environments use Unity at 115200 baud, exclude application sources,
+and provide their own entrypoints. Guided/soak/card-fixture suites are opt-in.
+Flashing and device actions require a task that authorizes them; do not upload automatically
 as a consequence of building. Report what was checked and which behavior still
 requires physical verification.
 

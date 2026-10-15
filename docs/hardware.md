@@ -1,6 +1,6 @@
 # ESP32-8048S070 hardware reference
 
-Evidence reviewed: 2026-10-15. This guide covers the whole board and the current
+Evidence reviewed: 2026-10-16. This guide covers the whole board and the current
 PlatformIO firmware. Essential settings are recorded here so the vendor download
 is not required just to understand the project.
 
@@ -23,7 +23,9 @@ the board. Visible row drift appeared at 20/25/33 MHz; the current target is
 16 MHz. The layout and animation can be assessed through camera captures,
 but reflection and the oblique camera angle limit precise color/contrast
 assessment. Touch detection, tap/release events, and button clicks are hardware-observed;
-full corner/drag alignment checks remain open. SD, audio, and wireless remain unverified.
+corner/center, drag, release, and multi-finger checks passed in the 2026-10-16
+Unity session below. SD mount/read/write/remove is hardware-observed following
+an initial mount failure; audio and wireless remain unverified.
 
 Vendor setup instructions are reference material, not instructions for this
 repository. The existing PlatformIO configuration remains the software baseline.
@@ -84,11 +86,11 @@ filename says V1.0 while its title block says V0.1; retain that source ambiguity
 
 ## Current display implementation
 
-Sources: [firmware implementation](../src/main.cpp) (`display` namespace for
-configuration and the LVGL adapter; `touch` for GT911 input; `app` for
-the validation screen and diagnostics) and [LVGL configuration](../include/lv_conf.h). All application
-implementation lives in `main.cpp`; LVGL configuration and the C assertion
-bridge declaration remain in headers because LVGL compiles separately.
+Sources: [firmware implementation](../src/main.cpp) (`app` for the validation screen and diagnostics),
+[Display](../lib/board/Display.cpp), [Touch](../lib/board/Touch.cpp), and
+[SdCard](../lib/board/SdCard.cpp) and [LVGL configuration](../include/lv_conf.h). Peripheral implementation lives in the three classes under `lib/board/`;
+`main.cpp` owns their instances and the UI. LVGL configuration and the C
+assertion bridge declaration remain in headers because LVGL compiles separately.
 Arduino uses the native ESP-IDF `esp_lcd` RGB panel driver with LVGL 9.6.0
 software rendering. Arduino_GFX and the historical vendor LVGL copy are not
 firmware dependencies. The pin map is retained from the earlier rendering demo;
@@ -212,7 +214,7 @@ not continuous per-frame certification or a test with Wi-Fi/flash-write load.
 
 ### LVGL port and validation screen
 
-`display::begin()` holds backlight LOW, checks PSRAM, creates/resets/initializes
+`Display::begin()` holds backlight LOW, checks PSRAM, creates/resets/initializes
 the RGB panel, allocates the internal draw buffer, initializes LVGL, and registers
 an 800 x 480 display. Allocation and SDK failures are reported over serial;
 initialization failures release acquired resources. LVGL assertions also disable
@@ -221,7 +223,7 @@ backlight, print an error, and abort instead of silently hanging.
 The main sketch creates six RGB/white/black/gray swatches, three channel gradients,
 four corner labels, a one-pixel perimeter, uptime, and an endlessly reversing
 progress bar. The touch-enabled screen adds a tap-count button, coordinates,
-press/error counts, and an orange pointer marker. `display::show()` forces the initial LVGL render, then waits for a
+press/error counts, and an orange pointer marker. `Display::show()` forces the initial LVGL render, then waits for a
 scanout frame boundary before enabling backlight. Missing frame interrupts cause
 a reported failure after 250 ms; the backlight stays off.
 
@@ -291,7 +293,7 @@ Samples pass only the first touch point to LVGL, despite five-point driver array
 
 ### Current GT911 implementation
 
-The `touch` namespace in [main.cpp](../src/main.cpp) implements the register
+The [Touch class](../lib/board/Touch.cpp) implements the register
 protocol from the [music driver][touch-driver] and [TAMC driver][tamc], using
 Arduino Wire directly; no additional library dependency is needed. The LVGL
 adapter targets the pinned 9.6 API rather than the vendor LVGL 8 wrappers.
@@ -324,7 +326,8 @@ On 2026-10-15 the new firmware was built and uploaded through CH340C. Serial
 identified `GT911 911 at 0x5d`, raw 800 x 480. The user touched the screen: serial
 recorded seven down/up sequences and seven tap-button clicks; a camera capture
 showed `Tap test: 7`, released state, seven presses, and zero errors. Full
-corner alignment and drag-following are not yet verified. Reset fallback is
+corner alignment and drag-following were not verified in that session; the
+2026-10-16 guided checks below cover those behaviors. Reset fallback is
 host-tested but was not needed on this boot. Serial sampling continued for
 about two minutes with constant free-memory readings and no touch errors.
 The host serial reader then reported a disconnect or competing reader; a
@@ -361,10 +364,11 @@ does not prove SD operation. This evidence describes SPI mode, not an SDMMC pino
 
 ### Current SD implementation
 
-The `sdcard` namespace in [main.cpp](../src/main.cpp) initializes Arduino's
+The [SdCard class](../lib/board/SdCard.cpp) initializes Arduino's
 built-in `SPI` and `SD` libraries on CS10/MOSI11/SCK12/MISO13 at 1 MHz.
-This is project-configured from the vendor wiring and example, **not yet
-physically verified**. It does not change display timing or touch configuration.
+This wiring and clock are project-configured from the vendor example;
+mount/read/write/remove were hardware-verified on 2026-10-16 after an initial
+mount failure (see the class/test session below). It does not change display timing or touch configuration.
 GPIO11-13 remain shared with P2 and the optional resistive-touch alternative;
 do not attach an independently driven bus to those contacts.
 
@@ -377,16 +381,17 @@ leave the display and capacitive touch usable. Boot diagnostics read directory
 metadata only; they do not create, overwrite, or delete files.
 
 After successful initialization, application code on the Arduino task can use
-the standard `SD.open("/filename", FILE_READ)` or `FILE_WRITE` APIs and must
+the `SdCard::open("/filename", FILE_READ)` or `FILE_WRITE` APIs and must
 check open/read/write results and close files. Arduino SD paths are relative
 to the card root; `/sd` is the VFS mount point. No new dependency or internal
-flash partition is required for this external filesystem. File writes and
-LVGL filesystem/image integration are not exercised by this boot demonstration.
+flash partition is required for this external filesystem. File writes are exercised only by the opt-in hardware tests; LVGL
+filesystem/image integration is not part of this boot demonstration.
 
 There is no wired card-detect input or hot-plug service. The status is a boot
 snapshot; power off before swapping cards and reboot to remount. Physical
-validation still needs a known card, absent/unsupported-card boots, file
-read/write verification, and display/touch stability checks during SD activity.
+validation includes a known-card read/write/remove test. Separate absent/
+unsupported-card boot fixtures and combined stability evidence are
+recorded in the class/test session below.
 
 ### I2S audio and speaker
 
@@ -538,6 +543,93 @@ Boot traces still show the known missing NVS/otadata/core-dump partition warning
 from the existing app-only table. This display fix did not change partitioning
 or validate persistence/OTA.
 
+## Class extraction and repeatable tests (2026-10-16)
+
+Peripheral implementation is now shared between the demo and PlatformIO Unity
+suites through `Display`, `Touch`, and `SdCard` under `lib/board/`. Resource state
+belongs to instances; callbacks receive instance user data. A single instance
+owns each physical peripheral. `begin()` is idempotent while initialized;
+`end()` releases resources and allows a later retry. End touch before its
+display, close files before ending SD, and remove application timers before
+removing their display objects. LVGL initialization remains global and one-time.
+
+The pin map, 16 MHz PCLK, timing/polarity, RGB565 flush contract, GT911 reset and
+polling protocol, SD 1 MHz clock, and app-only partition table are unchanged.
+See [test instructions](../test/README.md) for native tests, all embedded
+suite commands, report export, required fixtures, and demo restoration.
+Native tests compile the production classes and LVGL against hardware fakes;
+they do not establish physical behavior. Embedded suites are distinct Unity
+programs, with application sources excluded and serial results at 115200 baud.
+Guided, one-minute soak, absent-card, and unsupported-card groups require explicit
+selection. The user shortened the new soak from ten minutes to one minute;
+the historical 2026-10-15 ten-minute display result remains separate.
+No committed test suite formats a card.
+
+Software validation: all 14 native cases passed. Every embedded suite compiled
+successfully using the pinned ESP32/LVGL stack; compile-only runs report skipped
+execution, not a hardware pass.
+
+Board session: `/dev/cu.usbserial-214220`, UART0/CH340C at 115200 baud, pinned
+Espressif32 7.1.3 / Arduino-ESP32 2.0.17 / LVGL 9.6.0. PCB revision and full
+power arrangement were not independently read. The card reports type
+`SDHC/SDXC`, 15,634,268,160 bytes (14,910 MiB).
+
+- Automatic display rendering/scanout and GT911 detection/polling passed.
+- The first SD test failed before file creation with `FR_NOT_READY` (physical
+  drive not ready). At the user's request, temporary maintenance firmware tried
+  the SDK's format-if-unrecognized option. Its captured reset successfully
+  mounted the card; existing files were retained, so no erased/formatted-card
+  claim is made. The generated maintenance project was removed afterward;
+  production firmware and all committed suites keep formatting disabled.
+- The SD retry passed: 8,192 binary bytes written in checked 512-byte chunks,
+  reopened and compared byte-for-byte, length checked, and temporary file
+  deleted, while display and touch were running. The cause of the initial
+  mount failure remains unconfirmed.
+- Guided corner/center, drag/release, and two-finger continuity tests all passed
+  in the final run, with no ignored cases and zero drag interruptions. Earlier
+  runs recorded interrupted operator gestures and incomplete multi-touch;
+  those reports are retained separately. The first interruption was confirmed
+  by the user as a tap/lift instead of a held drag. Additional release-reason
+  logging was added; the 150 ms stale timeout and protocol behavior are unchanged.
+
+- The requested **one-minute combined soak passed**. Eleven five-second
+  telemetry samples showed 28.77-29.00 frame callbacks/s (median 28.79), zero
+  touch errors, constant free internal RAM of 219,120 bytes, a constant largest
+  internal block of 184,308 bytes, and constant free PSRAM of 7,590,859 bytes.
+  SD verification reached 55 cycles in the last logged sample; the test requires
+  at least 50 cycles and runs for at least 60,000 ms. There was one boot banner
+  and no unexpected reset/assertion/copy failure in the captured run. The user
+  confirmed correct, stable colors, gradients, edges and animation during this
+  one-minute session; this is a visual user observation, not per-frame certification.
+- The preceding longer soak was interrupted at the user's request after more
+  than 210 seconds of clean recorded telemetry. It is retained as an interrupted
+  run, not a completed ten-minute pass. A leftover 8,192-byte temporary file
+  was subsequently handled by one-time cleanup firmware restricted to its exact
+  pathname and expected payload; no existing user file was selected.
+
+- Dedicated absent-card boot passed after the user powered off, removed the
+  card and reconnected. Mounting failed as expected while display frames and
+  GT911 polling continued with zero touch errors.
+
+- The unsupported-filesystem suite compiled, but physical execution remains
+  pending because the user did not have a known unsupported-filesystem card.
+  The pinned SDK has `FF_FS_EXFAT = 0`; an identified exFAT fixture is one
+  suitable future check. No card was reformatted to manufacture this fixture.
+
+Final normal-demo build: 86,180 bytes static RAM and 736,909 bytes flash.
+The restored firmware SHA-256 is
+`9295d655aee02aa341d72f23200f9fec51bb001588ca13e20cb0a2e306d7b5b1`.
+The normal demo was restored and serial-checked: GT911 detected at 0x5D,
+the original SD card mounted, regular frame diagnostics continued, and no test
+file remained in its root listing. Steady samples were 28.74-28.78 callbacks/s
+with constant free internal RAM of 219,504 bytes and free PSRAM of 7,590,859 bytes.
+The first startup-inclusive sample was lower (27.59/s).
+Local `.pio/peripheral-validation.json` indexes reports and built-image hashes.
+
+Local JSON/JUnit reports and raw serial logs are retained under ignored `.pio/`
+artifacts; they are not bundled vendor references or committed test evidence.
+A report's skipped/ignored cases must not be treated as successful verification.
+
 ## Future physical verification checklist
 
 Software verification on 2026-10-15:
@@ -567,14 +659,23 @@ source, and result for further checks.
 
 - [ ] Read the PCB revision, module ordering code, and touch option/markings.
 - [ ] Confirm connector contact orientation and supply voltage before attaching peripherals.
-- [ ] Display red/green/blue/white/black, gradients, corner markers, and all four edges; verify RGB565 order, final column, and stability at the current timing.
+- [x] Display colors, gradients, corner markers, and all four edges at the
+  current timing; the user confirmed correct, stable appearance during the
+  one-minute 2026-10-16 soak. Native rendering checks also cover RGB565 values
+  and the final row/column.
 - [x] Run the animated validation screen at 16 MHz for at least ten minutes; serial/camera sampling found no persistent drift, stall, or unexpected reset. Recorded callbacks were close to nominal 28.86 Hz.
 - [ ] Inspect every frame for subtle tearing/flicker with a clear, frontal view; current camera glare limits that assessment.
 - [x] Record total/free PSRAM and internal memory during the validation UI; memory readings stayed constant throughout the run.
 - [x] Detect GT911 at 0x5D and verify real tap/release events and LVGL tap-button clicks.
-- [ ] Verify touch cold-start/fallback reset, held/dragged and multi-finger behavior,
-  and every corner's axis/orientation; account for the physical GPIO18 IRQ/audio sharing.
-- [ ] Mount a known card in SPI mode, test read/write, and check absent-card/mount-failure handling.
+- [x] Verify corner/center alignment, a continuous held drag/release, and
+  multi-finger contact continuity through guided Unity checks (2026-10-16).
+- [ ] Verify cold-start/fallback reset specifically; the normal probe worked
+  during these tests. Account for the physical GPIO18 IRQ/audio sharing.
+- [x] Mount a known card in SPI mode and verify binary write/read/remove
+  while display/touch run (2026-10-16, after an initial FR_NOT_READY mount failure).
+- [x] Check the dedicated absent-card boot fixture (2026-10-16).
+- [ ] Check the unsupported-filesystem boot fixture; no known fixture card was
+  available in the 2026-10-16 session.
 - [ ] Confirm audio BCLK against PCB revision and account for GPIO0 BOOT or GPIO19 touch sharing before driving it; test speaker output and USB-powered versus VIN-only behavior.
 - [x] Verify serial output at 115200 through CH340C and automatic upload/reset behavior.
 - [ ] Verify manual BOOT/RESET recovery if needed; it was not required during these uploads.
