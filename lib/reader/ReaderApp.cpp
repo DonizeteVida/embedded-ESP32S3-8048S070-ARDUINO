@@ -52,7 +52,7 @@ void ReaderApp::save_progress() {
     last_save=millis();
 }
 void ReaderApp::browse(const std::string &path,unsigned offset) {
-    screen.clear();directory.open(path,offset);mode=State::Browser;
+    screen.clear();directory.open(path,offset);mode=State::Browser;metadata_ready=false;
     screen.browser(directory,stats_store,card.is_mounted());
 }
 void ReaderApp::open_now(const std::string &path) {
@@ -62,9 +62,36 @@ void ReaderApp::open_now(const std::string &path) {
     account_time();save_progress();opening_counted=false;current_key.clear();progress_warning.clear();last_error.clear();
     screen.loading("Opening comic","Cleaning previous page cache...");
     directory.close();decoder.release();extractor.close();
-    book_path=source;navigation_index=0;stats=ReadingStats{};
+    book_path=source;navigation_index=0;stats=ReadingStats{};metadata_ready=false;prefetch_failed=UINT32_MAX;
     if (!extractor.start(source)) { last_error=extractor.error();browse(directory.path(),directory.offset());screen.message(last_error.c_str());return; }
     mode=State::Extracting;
+}
+void ReaderApp::page_failure(const std::string &error) {
+    last_error=error;mode=State::Reading;reading_tick=millis();
+    screen.reading(opening_counted?decoder.pixels():nullptr,basename(book_path),opening_counted?stats.last_page+1:0,extractor.pages().size());
+    screen.message(("Page "+std::to_string(navigation_index+1)+": "+last_error+"\nTap right to try the next page.").c_str());
+}
+void ReaderApp::load_page(unsigned index) {
+    if (index>=extractor.pages().size()) return;
+    account_time();navigation_index=index;
+    // Reuse an in-flight prefetch of this exact page; redirects stop and remove
+    // the partial job before reading any other archive member.
+    if (!extractor.request_page(index,opening_counted?stats.last_page:UINT32_MAX)) { page_failure(extractor.error());return; }
+    if (extractor.cached(index)) { decode_page(index);return; }
+    mode=State::Extracting;
+    screen.loading("Loading page",extractor.pages()[index].name);
+}
+void ReaderApp::prefetch_next() {
+    if (!opening_counted) return;
+    unsigned next=stats.last_page+1;
+    if (next>=extractor.pages().size()) {
+        extractor.request_page(stats.last_page,stats.last_page);return;
+    }
+    if (prefetch_failed==next) return;
+    if (!extractor.request_page(next,stats.last_page)) {
+        prefetch_failed=next;
+        Serial.printf("Reader prefetch failed: %s\n",extractor.error().c_str());
+    }
 }
 void ReaderApp::decode_page(unsigned index) {
     if (index>=extractor.pages().size()) return;
@@ -89,18 +116,23 @@ void ReaderApp::decode_page(unsigned index) {
         save_progress();
         if (!progress_warning.empty()) { screen.message(progress_warning.c_str());progress_warning.clear(); }
         Serial.printf("Reader page: %u/%u decoded in %lu ms\n",index+1,(unsigned)stats.total_pages,(unsigned long)(millis()-start));
-    } else {
-        last_error=decoder.error();
-        screen.reading(opening_counted?decoder.pixels():nullptr,basename(book_path),opening_counted?stats.last_page+1:0,extractor.pages().size());
-        screen.message(("Page "+std::to_string(index+1)+": "+last_error+"\nTap right to try the next page.").c_str());
-    }
+        prefetch_next();
+    } else page_failure(decoder.error());
 }
 void ReaderApp::handle_action() {
     Action command=pending;unsigned index=pending_index;pending=Action::None;
     if (command==Action::None) return;
     if (command==Action::Dismiss) { screen.dismiss();return; }
-    if (command==Action::Cancel && mode==State::Extracting) { extractor.cancel();return; }
-    if ((command==Action::Back || command==Action::Cancel) && (mode==State::Reading || mode==State::Decoding)) {
+    if (command==Action::Cancel && mode==State::Extracting) {
+        if (metadata_ready && opening_counted) {
+            prefetch_failed=navigation_index;
+            if (!extractor.stop_page()) { page_failure(extractor.error());return; }
+            navigation_index=stats.last_page;mode=State::Reading;reading_tick=millis();
+            screen.reading(decoder.pixels(),basename(book_path),stats.last_page+1,stats.total_pages);
+        } else extractor.cancel();
+        return;
+    }
+    if ((command==Action::Back || command==Action::Cancel) && (mode==State::Reading || mode==State::Decoding || (command==Action::Back && mode==State::Extracting && metadata_ready))) {
         account_time();save_progress();std::string warning=progress_warning;progress_warning.clear();
         opening_counted=false;current_key.clear();screen.clear();decoder.release();extractor.close();
         browse(directory.path(),directory.offset());if(!warning.empty()) screen.message(warning.c_str());return;
@@ -118,8 +150,8 @@ void ReaderApp::handle_action() {
             if (item.directory) browse(path);else open_now(path);
         }
     } else if (mode==State::Reading) {
-        if (command==Action::NextPage && navigation_index+1<extractor.pages().size()) decode_page(navigation_index+1);
-        else if (command==Action::PreviousPage && navigation_index>0) decode_page(navigation_index-1);
+        if (command==Action::NextPage && navigation_index+1<extractor.pages().size()) load_page(navigation_index+1);
+        else if (command==Action::PreviousPage && navigation_index>0) load_page(navigation_index-1);
         else if (command==Action::ToggleControls) screen.toggle_controls();
         else if (command==Action::Info) {
             account_time();char text[240];
@@ -136,6 +168,7 @@ void ReaderApp::diagnostics() {
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),(unsigned)ESP.getFreePsram(),(unsigned long)touch.state().errors,unsigned(mode));
     if (mode==State::Reading && opening_counted) Serial.printf("Reader progress: %s page %lu/%lu opens %lu visible_ms %llu completed %u\n",book_path.c_str(),(unsigned long)(stats.last_page+1),(unsigned long)stats.total_pages,(unsigned long)stats.opening_count,(unsigned long long)stats.reading_ms,unsigned(stats.completed));
+    if (metadata_ready) Serial.printf("Reader cache: %u verified pages; prefetch %u\n",extractor.cached_count(),unsigned(prefetch_busy()));
     last_diagnostic=now;last_frames=frames;
 }
 void ReaderApp::service() {
@@ -147,20 +180,35 @@ void ReaderApp::service() {
         extractor.step();
         char progress[160];
         if (extractor.phase()==ComicExtractor::Phase::Indexing) snprintf(progress,sizeof(progress),"Indexing archive: %u entries",extractor.scanned());
-        else snprintf(progress,sizeof(progress),"Extracting pages: %u / %u",extractor.done(),(unsigned)extractor.pages().size());
-        screen.loading("Opening comic",progress,extractor.phase()!=ComicExtractor::Phase::Cancelling);
+        else if (metadata_ready && navigation_index<extractor.pages().size()) snprintf(progress,sizeof(progress),"Page %u / %u: %lu / %lu KiB",navigation_index+1,(unsigned)extractor.pages().size(),(unsigned long)(extractor.extracted_bytes()/1024),(unsigned long)(extractor.pages()[navigation_index].bytes/1024));
+        else snprintf(progress,sizeof(progress),"Preparing comic index...");
+        screen.loading(metadata_ready?"Loading page":"Opening comic",progress,extractor.phase()!=ComicExtractor::Phase::Cancelling);
         if (extractor.phase()==ComicExtractor::Phase::Ready) {
-            current_key=extractor.key();stats_store.load(current_key,stats);progress_warning=stats_store.error();
-            stats.source_bytes=0;File source=card.open(book_path.c_str());if (source) stats.source_bytes=source.size();source.close();
-            stats.total_pages=extractor.pages().size();
-            decode_page(std::min<uint32_t>(stats.last_page,stats.total_pages-1));
+            if (!metadata_ready) {
+                current_key=extractor.key();stats_store.load(current_key,stats);progress_warning=stats_store.error();
+                stats.source_bytes=0;File source=card.open(book_path.c_str());if (source) stats.source_bytes=source.size();source.close();
+                stats.total_pages=extractor.pages().size();metadata_ready=true;
+                load_page(std::min<uint32_t>(stats.last_page,stats.total_pages-1));
+            } else decode_page(navigation_index);
+        } else if (extractor.phase()==ComicExtractor::Phase::PageFailed) {
+            page_failure(extractor.error());
         } else if (extractor.phase()==ComicExtractor::Phase::Failed || extractor.phase()==ComicExtractor::Phase::Cancelled) {
             last_error=extractor.error();browse(directory.path(),directory.offset());
             if (!last_error.empty()) screen.message(last_error.c_str());
         }
-    } else if (mode==State::Reading && uint32_t(millis()-last_save)>=30000) {
-        save_progress();
-        if(!progress_warning.empty()) { screen.message(progress_warning.c_str());progress_warning.clear(); }
+    } else if (mode==State::Reading) {
+        // A single bounded ZIP step per loop, with the current page still visible.
+        if (extractor.busy()) {
+            extractor.step();
+            if (extractor.phase()==ComicExtractor::Phase::PageFailed) {
+                prefetch_failed=extractor.requested_page();
+                Serial.printf("Reader prefetch failed: %s\n",extractor.error().c_str());
+            }
+        }
+        if (uint32_t(millis()-last_save)>=30000) {
+            save_progress();
+            if(!progress_warning.empty()) { screen.message(progress_warning.c_str());progress_warning.clear(); }
+        }
     }
     diagnostics();delay(5);
 }

@@ -3,11 +3,19 @@
 namespace reader {
 class ComicExtractor {
 public:
-    enum class Phase { Idle, Clearing, Indexing, Extracting, Ready, Cancelling, Cancelled, Failed };
+    enum class Phase { Idle, Clearing, Indexing, Extracting, Ready, Cancelling, Cancelled, PageFailed, Failed };
     explicit ComicExtractor(SdCard &card) : card(card) {}
     ~ComicExtractor();
     bool start(const std::string &source);
     void step();
+    // start() indexes metadata only. Extract one requested page; retain the
+    // displayed page plus this target, never the rest of the book.
+    bool request_page(unsigned index, unsigned keep = UINT32_MAX);
+    bool stop_page();
+    bool cached(unsigned index) const;
+    unsigned cached_count() const;
+    unsigned requested_page() const { return target; }
+    uint32_t extracted_bytes() const { return written; }
     void cancel();
     void close(); // Call after the reader has released any page references.
     Phase phase() const { return state; }
@@ -28,12 +36,15 @@ private:
     PageList images;
     Phase state = Phase::Idle;
     std::string source, failure, identity;
-    uint64_t fingerprint = 14695981039346656037ULL, expanded = 0;
+    uint64_t fingerprint = 14695981039346656037ULL;
     uint32_t ordinal = 0, zip_ordinal = 0, written = 0;
-    unsigned completed = 0;
+    unsigned completed = 0, target = UINT32_MAX;
+    unsigned cached_indices[2] = {UINT32_MAX, UINT32_MAX};
+    bool partial_owned = false;
     bool member_open = false, zip_open = false;
     uint8_t buffer[4096];
     void fail(const char *message);
+    void fail_page(const char *message);
     void release_archive();
     bool clear_one();
     bool open_archive();

@@ -72,7 +72,10 @@ shared pins, and open questions.
   on the physical board. Do not claim a successful build proves hardware works.
 - The current partition table has no NVS, filesystem, or complete OTA layout.
   Reader persistence is on SD under `/.comic-reader/stats/`; cache cleanup must
-  only touch the marked `/.comic-reader/cache/`. Never format a card. Keep SD
+  only touch the marked `/.comic-reader/cache/`. Index CBZ metadata first; extract
+  the requested page and prefetch only the page after a successful presentation.
+  Keep at most the displayed page and one following cache file. A prefetch error
+  must preserve the current image, index and saved progress. Never format a card. Keep SD
   at the validated frequency in `include/reader_config.h`; higher clocks need
   integrity, touch and visual evidence with RGB fixed at 16 MHz. Revisit the
   partition table explicitly if internal persistence or OTA is introduced.

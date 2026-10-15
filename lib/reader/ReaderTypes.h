@@ -13,7 +13,6 @@ constexpr const char *kRoot = "/.comic-reader";
 constexpr const char *kCache = "/.comic-reader/cache";
 constexpr const char *kStats = "/.comic-reader/stats";
 constexpr size_t kMaxPages = 4096;
-constexpr uint64_t kMaxExtractedBytes = 1024ULL * 1024 * 1024;
 constexpr uint32_t kMaxPageBytes = 64UL * 1024 * 1024;
 
 uint64_t hash_bytes(uint64_t hash, const void *bytes, size_t size);

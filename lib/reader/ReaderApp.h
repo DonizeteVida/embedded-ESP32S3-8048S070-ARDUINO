@@ -32,6 +32,9 @@ public:
     Display &display_device() { return display; }
     Touch &touch_device() { return touch; }
     bool browser_busy() const { return directory.busy(); }
+    unsigned cached_page_count() const { return extractor.cached_count(); }
+    bool page_cached(unsigned index) const { return extractor.cached(index); }
+    bool prefetch_busy() const { return mode==State::Reading && extractor.busy(); }
     const uint16_t *page_pixels() const { return decoder.pixels(); }
 private:
     Display display;Touch touch;SdCard card;
@@ -40,12 +43,16 @@ private:
     State mode=State::Stopped;
     Action pending=Action::None;
     unsigned pending_index=0,navigation_index=0;
-    bool opening_counted=false;
+    bool opening_counted=false,metadata_ready=false;
+    unsigned prefetch_failed=UINT32_MAX;
     uint32_t reading_tick=0,last_save=0,last_pump=0,last_diagnostic=0,last_frames=0;
     std::string pending_path,book_path,current_key,last_error,progress_warning;
     void browse(const std::string &path,unsigned offset=0);
     void open_now(const std::string &path);
     void decode_page(unsigned index);
+    void load_page(unsigned index);
+    void page_failure(const std::string &error);
+    void prefetch_next();
     void handle_action();
     void account_time();
     void save_progress();

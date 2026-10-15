@@ -38,7 +38,10 @@ void ComicExtractor::release_archive() {
     zip_file.close(); output.close(); cache_directory.close();
     if (active == this) active = nullptr;
 }
-void ComicExtractor::close() { release_archive(); images.clear(); state = Phase::Idle; }
+void ComicExtractor::close() {
+    stop_page();release_archive();images.clear();state=Phase::Idle;
+    cached_indices[0]=cached_indices[1]=UINT32_MAX;target=UINT32_MAX;
+}
 void ComicExtractor::fail(const char *message) {
     failure = message; release_archive();
     // Cleanup is cooperative too; only the marked, flat private cache is touched.
@@ -47,7 +50,7 @@ void ComicExtractor::fail(const char *message) {
 }
 bool ComicExtractor::start(const std::string &path) {
     close(); failure.clear(); identity.clear(); source = canonical_path(path);
-    fingerprint = 14695981039346656037ULL; expanded = 0; ordinal = zip_ordinal = written = completed = 0;
+    fingerprint = 14695981039346656037ULL; ordinal = zip_ordinal = written = completed = 0;
     if (!prepare_private_storage(card, failure)) { state = Phase::Failed; return false; }
     cache_directory = card.open(kCache);
     if (!cache_directory || !cache_directory.isDirectory()) { failure = "Cannot open page cache."; state = Phase::Failed; return false; }
@@ -105,8 +108,59 @@ bool ComicExtractor::open_archive() {
 }
 void ComicExtractor::cancel() {
     if (!busy()) return;
-    failure.clear(); release_archive(); cache_directory = card.open(kCache); state = Phase::Cancelling;
+    failure.clear();stop_page();release_archive();cache_directory=card.open(kCache);state=Phase::Cancelling;
+    cached_indices[0]=cached_indices[1]=UINT32_MAX;
 }
+
+bool ComicExtractor::cached(unsigned index) const {
+    return index<images.size() && (cached_indices[0]==index || cached_indices[1]==index);
+}
+unsigned ComicExtractor::cached_count() const {
+    return unsigned(cached_indices[0]!=UINT32_MAX)+unsigned(cached_indices[1]!=UINT32_MAX);
+}
+bool ComicExtractor::stop_page() {
+    output.close();
+    if (member_open && zip) static_cast<UNZIP *>(zip)->closeCurrentFile();
+    member_open=false;
+    if (partial_owned && target<images.size()) {
+        const auto path=images[target].cache_path();
+        if (card.exists(path.c_str()) && !card.remove(path.c_str())) {
+            failure="Cannot remove partial cached page.";state=Phase::PageFailed;return false;
+        }
+    }
+    partial_owned=false;
+    if (state==Phase::Extracting) state=Phase::Ready;
+    return true;
+}
+void ComicExtractor::fail_page(const char *message) {
+    failure=message;
+    stop_page(); // Only the failed target is removed; current page/index survive.
+    state=Phase::PageFailed;
+}
+bool ComicExtractor::request_page(unsigned index,unsigned keep) {
+    if (index>=images.size() || !zip || (state!=Phase::Ready && state!=Phase::PageFailed && state!=Phase::Extracting)) return false;
+    if (state==Phase::Extracting && target==index) return true;
+    if (!stop_page()) return false;
+    failure.clear();
+    for (unsigned &slot:cached_indices) {
+        if (slot!=UINT32_MAX && slot!=index && slot!=keep) {
+            const auto path=images[slot].cache_path();
+            if (!card.remove(path.c_str())) { failure="Cannot evict cached page.";state=Phase::PageFailed;return false; }
+            slot=UINT32_MAX;
+        }
+    }
+    target=index;written=0;state=Phase::Ready;
+    if (cached(index)) return true;
+    if (card.free_bytes()<uint64_t(images[index].bytes)+1024*1024) {
+        failure="Not enough free space for this page.";state=Phase::PageFailed;return false;
+    }
+    if (images[index].ordinal<zip_ordinal) {
+        if (static_cast<UNZIP *>(zip)->gotoFirstFile()!=UNZ_OK) { fail_page("Cannot rewind archive.");return false; }
+        zip_ordinal=0;
+    }
+    state=Phase::Extracting;return true;
+}
+
 void ComicExtractor::step() {
     if (state == Phase::Clearing) {
         if (!clear_one()) return;
@@ -130,46 +184,45 @@ void ComicExtractor::step() {
         const uint32_t metadata[] = {uint32_t(info.crc), uint32_t(info.uncompressed_size)};
         fingerprint = hash_bytes(fingerprint, metadata, sizeof(metadata));
         if (name[std::strlen(name)-1] != '/' && image_name(name)) {
-            if (info.uncompressed_size > kMaxPageBytes || expanded + info.uncompressed_size > kMaxExtractedBytes) { fail("Comic exceeds 64 MiB/page or 1 GiB extracted limit."); return; }
+            if (info.uncompressed_size > kMaxPageBytes) { fail("Page exceeds the 64 MiB limit."); return; }
             Page page; snprintf(page.name, sizeof(page.name), "%s", name);
             page.ordinal = ordinal; page.cache_index = images.size(); page.bytes = info.uncompressed_size;
             snprintf(page.suffix, sizeof(page.suffix), "%s", extension(name).c_str());
             if (!images.push(page)) { fail("Comic exceeds the 4096-page limit."); return; }
-            expanded += info.uncompressed_size;
         }
         ++ordinal;
         int next = unzip->gotoNextFile();
         if (next == UNZ_END_OF_LIST_OF_FILE) {
             if (!images.size()) { fail("No supported JPEG or PNG pages in this comic."); return; }
-            if (card.free_bytes() < expanded + 1024 * 1024) { fail("Not enough free space to extract this comic."); return; }
             identity = book_key(source, fingerprint);
             if (unzip->gotoFirstFile() != UNZ_OK) { fail("Cannot rewind archive."); return; }
-            state = Phase::Extracting;
+            zip_ordinal=0;
+            std::sort(images.begin(), images.end(), [](const Page &a, const Page &b) { return natural_less(a.name, b.name); });
+            state = Phase::Ready;
         } else if (next != UNZ_OK || ordinal >= 65535) fail("Damaged or oversized ZIP directory.");
         return;
     }
     if (state == Phase::Extracting) {
         if (!member_open) {
-            const Page &page = images[completed];
+            const Page &page = images[target];
             if (zip_ordinal < page.ordinal) {
-                if (unzip->gotoNextFile() != UNZ_OK) { fail("Cannot locate next page."); return; }
+                if (unzip->gotoNextFile() != UNZ_OK) { fail_page("Cannot locate requested page."); return; }
                 ++zip_ordinal; return;
             }
+            partial_owned=true;
             output = card.open(page.cache_path().c_str(), FILE_WRITE);
-            if (!output || unzip->openCurrentFile() != UNZ_OK) { fail("Cannot create or decompress cached page."); return; }
+            if (!output || unzip->openCurrentFile() != UNZ_OK) { fail_page("Cannot create or decompress cached page."); return; }
             member_open = true; written = 0;
         }
         int count = unzip->readCurrentFile(buffer, sizeof(buffer));
-        if (count < 0 || (count > 0 && (written + uint64_t(count) > images[completed].bytes || output.write(buffer, count) != size_t(count)))) { fail("Page extraction failed or SD write was short."); return; }
+        if (count < 0 || (count > 0 && (written + uint64_t(count) > images[target].bytes || output.write(buffer, count) != size_t(count)))) { fail_page("Page extraction failed or SD write was short."); return; }
         if (count > 0) { written += count; return; }
         output.close();
         int crc = unzip->closeCurrentFile(); member_open = false;
-        if (crc != UNZ_OK || written != images[completed].bytes) { fail("Page checksum or extracted length failed."); return; }
-        if (++completed == images.size()) {
-            release_archive();
-            std::sort(images.begin(), images.end(), [](const Page &a, const Page &b) { return natural_less(a.name, b.name); });
-            state = Phase::Ready;
-        }
+        if (crc != UNZ_OK || written != images[target].bytes) { fail_page("Page checksum or extracted length failed."); return; }
+        partial_owned=false;
+        for (unsigned &slot:cached_indices) if (slot==UINT32_MAX) { slot=target;break; }
+        ++completed;state=Phase::Ready;
     }
 }
 }

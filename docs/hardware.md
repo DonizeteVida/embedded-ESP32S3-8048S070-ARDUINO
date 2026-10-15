@@ -648,6 +648,9 @@ A report's skipped/ignored cases must not be treated as successful verification.
 
 ## Portrait CBZ reader validation (2026-10-16)
 
+This records the initial full-extraction reader. The on-demand update below
+supersedes its cache policy, firmware identity and latest validation results.
+
 Current source architecture and limits are documented in [reader.md](reader.md).
 Board port: `/dev/cu.usbserial-214220`, CH340C, UART 115200. The fitted card reports
 SDHC/SDXC, 14,910 MiB; it is the working FAT card from the earlier session.
@@ -757,6 +760,61 @@ feature was added. Known missing NVS/otadata/core-dump warnings still come from 
 unchanged partition table. Expected attempts to load absent first-use progress
 records can produce Arduino VFS “does not exist” diagnostics; these are distinct
 from failed SD transactions or reported reader save errors.
+
+## On-demand page extraction (2026-10-16)
+
+The reader now indexes all ZIP metadata for ordering, path checks and book
+identity, then extracts only the saved page. Once that image is successfully
+presented, the next page alone is prefetched in bounded steps while the current
+page remains visible. Cache retention is limited to the displayed page and one
+look-ahead page. Backward turns re-extract an evicted image; a forward request
+reuses an in-progress prefetch rather than restarting it. No skipped image is
+decompressed merely to reach another archive entry.
+
+A page extraction/CRC failure now removes only that partial file and preserves
+the displayed image, index and progress. Background failures do not interrupt a
+good page or retry forever. A foreground request retries the failed page and
+reports an error if needed. Cancel during a page turn restores the displayed
+page; Cancel during initial opening clears the partial cache and returns to the
+browser. Prefetch does not advance saved progress, completion or opening count.
+Book identity and statistics format are unchanged, so existing records resume
+directly after the new metadata scan. Space checks cover the requested page plus
+a 1 MiB margin, rather than the entire expanded book. The former aggregate 1 GiB
+extraction limit is unnecessary; the 4096-page, 64 MiB/page, decoder-dimension and
+signed archive-size limits remain. At most two page files use 128 MiB combined.
+
+**32 native tests passed**, including the original regressions plus a 100-page
+book on simulated storage sized for only its two-page window, eviction and
+backward navigation, redirecting/removing partial jobs, direct resume without
+extracting earlier pages, foreground Cancel preserving the image, and a prefetched
+CRC failure that preserves current pixels/statistics and permits a later skip.
+Reading time includes visible-page prefetch work and excludes foreground loading.
+The new synthetic `late-crc.cbz` has good first/third pages and a corrupt second
+member. Reports: `.pio/demand-native.json` and `.xml` (local ignored artifacts).
+
+The on-device reader integration/one-minute suite **passed** on
+`/dev/cu.usbserial-214220`: correct JPEG/PNG colors, one-page prefetch bound,
+cancellation, multi-book completion, direct saved-page reopen and application
+restart, then **47 completed turns** in the one-minute workload. Scanout was
+**28.83 Hz**, touch errors **zero**, free internal memory **132,032 → 132,032
+bytes**, and free PSRAM **4,882,787 bytes**. The ZIP workspace now stays allocated
+while the book is open so further pages can be requested. RGB and SD both remain
+at their previously validated 16 MHz settings; pin mapping, partitions, codecs
+and display rotation are unchanged. Local results: `.pio/demand-hardware.*`;
+total suite time 107.02 seconds includes setup and checks outside the soak.
+These are automatic hardware results; the earlier operator visual/touch and
+physical power-cycle checks remain recorded above and were not repeated for
+this extraction-only update.
+
+Production build passed (91,948 bytes static RAM, 870,757 bytes application
+flash) and was restored to the selected board with esptool hash verification.
+Build identity: `Oct 16 2026 01:53:54`, LVGL 9.6.0. Normal boot mounted the card
+at 16 MHz, identified GT911 at 0x5D, and opened the portrait browser. Idle samples
+reported 28.78 Hz, 137,752 bytes free internal RAM, 7,590,859 bytes free PSRAM,
+and zero touch errors. The temporary serial observer was closed after checking.
+SHA-256 of `.pio/build/esp32-s3-devkitc-1/firmware.bin`:
+`9005acc4a175841552d4e5fb3d3044f58faf5fa37e3be491686dc791826eef6d`.
+See [reader usage](reader.md) for the revised cache and cancellation behavior.
 
 ## Future physical verification checklist
 

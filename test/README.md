@@ -147,3 +147,18 @@ Its live loop runs the reader after Unity completes. Restore normal production
 firmware before final manual/power-cycle checks. It can also remove abandoned
 `/reader-test-*` folders only after confirming every entry and all bytes match the
 two generated fixture books; unknown or partial contents remain untouched.
+
+## On-demand extraction
+
+The reader now indexes CBZ metadata without extracting images. The saved page
+is extracted first; while it is displayed, only the following page is prefetched
+in bounded steps. At most two cache files are retained. Backward navigation
+re-extracts evicted pages; foreground requests reuse or redirect the pending job.
+
+Native coverage includes a 100-page book on a card with space for only the
+two-page window, eviction, redirecting/removing partial jobs, backward turns,
+direct resume, foreground cancellation and prefetch CRC failures that preserve
+the displayed image and statistics. `late-crc.cbz` has a good first page, a bad
+CRC on its second, and a good third. The hardware reader suite now waits for
+asynchronous turns, counts completed turns, and asserts the cache stays bounded.
+Reports for this change use `.pio/demand-native.*` and `.pio/demand-hardware.*`.

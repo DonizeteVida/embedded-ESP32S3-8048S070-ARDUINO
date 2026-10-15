@@ -10,8 +10,16 @@ LVGL row objects. Only the reserved `/.comic-reader` application directory is
 hidden. Selecting CBR explains that support is coming later; other unsupported
 files show a message. CBZ rows show saved page progress when available.
 
-Tap a CBZ to extract all supported JPEG/PNG entries. Cancel removes partial
-cache files. When a page is visible, tap the left/right third to move one page,
+Tap a CBZ to index its entries and extract only the saved page (or page one).
+Once that page is displayed, the reader extracts just the next page in the
+background. It keeps at most the displayed page and one look-ahead page on SD;
+there is no full-book extraction or automatic page turning. Going backward
+extracts that page again if it was evicted. If you turn forward before prefetch
+finishes, loading waits for the same job instead of starting it over.
+
+Cancel during opening returns to the browser and removes partial cache files.
+Cancel while loading another page restores the last displayed page. When a page
+is visible, tap the left/right third to move one page,
 or the center to toggle the overlay. Back returns to the folder. Stats shows
 page count, opening count, accumulated reading time and completion. The
 whole image fits the display with black margins; there is no cropping, zoom,
@@ -48,8 +56,10 @@ Directories, Apple `__MACOSX`/`._` metadata and non-image members are ignored.
 
 The reader rejects encrypted, split, ZIP64, linked and unsupported-compression
 entries, unsafe or oversized paths, ZIP CRC failures, archives over the signed
-32-bit codec API limit, more than 4096 pages, pages over 64 MiB, and more than
-1 GiB extracted data. It requires an additional 1 MiB free-space margin. Corrupt,
+32-bit codec API limit, more than 4096 pages, and pages over 64 MiB. Space is
+checked for each requested page with an additional 1 MiB margin after eviction;
+a book no longer needs enough free space for all its expanded pages. Cache
+storage is bounded by two page files (at most 128 MiB). Corrupt,
 progressive-JPEG, interlaced-PNG and oversized pages display an error without
 advancing saved progress. Dismiss the error and tap right to skip a bad page.
 
@@ -68,6 +78,21 @@ files and images are closed, and only `/.comic-reader/cache/` is cleared. Archiv
 paths never become output paths: cache pages use generated numeric names.
 Unexpected subdirectories inside the flat private cache stop cleanup.
 
+Opening still scans the ZIP central directory for safe paths, natural ordering,
+page count and a stable book identity. This reads metadata, not page contents.
+CRC checks happen when a page is extracted; a corrupt unread page no longer
+blocks opening an earlier good page. Each archive member requested is streamed
+in 4096-byte steps. The pinned ZIP API walks directory entries to seek to a page;
+backward jumps can require a metadata rescan, without decompressing skipped pages.
+
+A failed or interrupted prefetch removes only its partial file and preserves the
+current image, book index, and progress. It does not show an error over a valid
+current page or retry endlessly. Requesting that page explicitly retries and
+shows a normal error on failure; it can then be skipped. Prefetching never
+increments the last-read page, opening count, or completion. Time spent with a
+page visible continues to count during background extraction; foreground
+loading time is excluded.
+
 Statistics write failures display a warning; a failed panel copy never advances
 saved progress.
 
@@ -84,7 +109,7 @@ pages, completion, opening count, and accumulated milliseconds with a page
 visible. They save after page changes, every 30 seconds, and on Back/exit.
 Loading and browsing time is excluded. Completion is reached when the final
 page is displayed successfully. Every successful reopen increments the opening
-count and re-extracts the archive before restoring its saved page. Boot always
+count and re-indexes the archive, then extracts its saved page directly. Boot always
 opens the browser. A sudden power loss can lose up to the last checkpoint's
 reading time. Alternating `.json`/`.bak` records and a verified `.tmp` permit
 recovery after interrupted writes/renames; they cannot guarantee survival of
@@ -106,7 +131,7 @@ pio test -e hardware-reader-benchmark --upload-port <port> --test-port <port>
 
 The reader hardware suite creates uniquely named synthetic CBZ books in a new
 `/reader-test-<time>-<suffix>/` folder and removes them in fixture cleanup. Its
-statistics remain in private storage as test records. It checks extraction,
+statistics remain in private storage as test records. It checks on-demand extraction and the two-page cache bound,
 JPEG/PNG pixels, multiple books, cancellation, reopening, application restart and
 one minute of page turns with stats writes. Application restart is distinct from
 physical power-cycle verification. Native tests use the pinned codecs and LVGL
@@ -131,6 +156,6 @@ A dedicated `hardware-reader-samples` suite provisions the generated manual-test
 books under `/Reader samples/` and leaves the reader running. It intentionally
 retains that marked folder for physical power-cycle and multi-book checks. It
 refuses unknown folders or changed existing sample files. `Long book.cbz` offers
-a 100-page extraction so Cancel can be exercised. The other samples cover natural
+100 indexed pages for opening/cancellation and on-demand cache checks. The other samples cover natural
 page order, a second book, a corrupt page, and the deferred CBR message. This
 provisioner is opt-in and is never called by normal firmware.

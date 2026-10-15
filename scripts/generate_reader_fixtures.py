@@ -37,6 +37,12 @@ crc=bytearray(archive('bad-crc.cbz',[('1.jpg',red)],zipfile.ZIP_STORED))
 offset=crc.find(b'PK\x03\x04');name_size,extra_size=struct.unpack_from('<HH',crc,offset+26)
 crc[offset+30+name_size+extra_size+100]^=1
 (root/'bad-crc.cbz').write_bytes(crc)
+late_crc=bytearray(archive('late-crc.cbz',[('1.jpg',red),('2.jpg',blue),('3.png',green)],zipfile.ZIP_STORED))
+with zipfile.ZipFile(io.BytesIO(late_crc)) as z:
+    offset=z.getinfo('2.jpg').header_offset
+name_size,extra_size=struct.unpack_from('<HH',late_crc,offset+26)
+late_crc[offset+30+name_size+extra_size+100]^=1
+(root/'late-crc.cbz').write_bytes(late_crc)
 # Mark the otherwise valid central entry encrypted; preflight must reject it.
 encrypted=bytearray((root/'ordered.cbz').read_bytes());central=encrypted.find(b'PK\x01\x02');encrypted[central+8]|=1
 (root/'encrypted.cbz').write_bytes(encrypted)

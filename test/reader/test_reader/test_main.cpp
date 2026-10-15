@@ -12,6 +12,15 @@ static void wait_for(ReaderApp::State desired,uint32_t timeout=90000) {
     while(uint32_t(millis()-start)<timeout);
     TEST_FAIL_MESSAGE(app.error().empty()?"Reader action timed out":app.error().c_str());
 }
+static void wait_page(unsigned page) {
+    wait_for(ReaderApp::State::Reading);TEST_ASSERT_EQUAL(page,app.displayed_page());
+    TEST_ASSERT_LESS_OR_EQUAL(2,app.cached_page_count());
+}
+static void wait_prefetch() {
+    uint32_t start=millis();
+    while(app.prefetch_busy() && uint32_t(millis()-start)<30000) app.service();
+    TEST_ASSERT_FALSE(app.prefetch_busy());TEST_ASSERT_LESS_OR_EQUAL(2,app.cached_page_count());
+}
 static void put(const std::string &path,const uint8_t *bytes,size_t size) {
     TEST_ASSERT_FALSE(app.storage().exists(path.c_str()));
     file=app.storage().open(path.c_str(),FILE_WRITE);TEST_ASSERT_TRUE(file);
@@ -48,29 +57,39 @@ static void test_reader_extract_decode_resume_cancel_and_one_minute_stability() 
     app.open_book(first_book);wait_for(ReaderApp::State::Reading);
     TEST_ASSERT_EQUAL(3,app.page_count());TEST_ASSERT_EQUAL(0,app.displayed_page());
     uint16_t color=app.page_pixels()[500*480+240];TEST_ASSERT_TRUE((color>>11)>(color&31));
-    app.next_page();app.service();TEST_ASSERT_EQUAL(1,app.displayed_page());
+    TEST_ASSERT_FALSE(app.page_cached(2));wait_prefetch();
+    TEST_ASSERT_TRUE(app.page_cached(0));TEST_ASSERT_TRUE(app.page_cached(1));
+    app.next_page();wait_page(1);
     color=app.page_pixels()[500*480+240];TEST_ASSERT_TRUE(((color>>5)&63)>(color>>11));
     app.back();wait_for(ReaderApp::State::Browser);
     app.open_book(second_book);wait_for(ReaderApp::State::Reading);TEST_ASSERT_EQUAL(2,app.page_count());
-    app.next_page();app.service();TEST_ASSERT_TRUE(app.statistics().completed);
+    app.next_page();wait_page(1);TEST_ASSERT_TRUE(app.statistics().completed);
     app.back();wait_for(ReaderApp::State::Browser);
     app.open_book(first_book);app.service();TEST_ASSERT_EQUAL(int(ReaderApp::State::Extracting),int(app.state()));
     app.cancel();wait_for(ReaderApp::State::Browser);
     app.open_book(first_book);wait_for(ReaderApp::State::Reading);TEST_ASSERT_EQUAL(1,app.displayed_page());
-    TEST_ASSERT_EQUAL(2,app.statistics().opening_count);
+    TEST_ASSERT_EQUAL(2,app.statistics().opening_count);TEST_ASSERT_FALSE(app.page_cached(0));
     app.end();TEST_ASSERT_TRUE(app.begin());wait_for(ReaderApp::State::Browser);
     app.open_book(first_book);wait_for(ReaderApp::State::Reading);TEST_ASSERT_EQUAL(1,app.displayed_page());
     TEST_ASSERT_EQUAL(3,app.statistics().opening_count);
-    uint32_t start=millis(),last_turn=start,last_frames=app.display_device().frame_count();unsigned turns=0;
+    uint32_t start=millis(),last_turn=start,last_frames=app.display_device().frame_count();unsigned turns=0,target=app.displayed_page();bool turn_pending=false;
     uint32_t initial_internal=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
     Serial.println("READER SOAK START: inspect portrait pages and tap center for controls; 60 seconds.");
     while(uint32_t(millis()-start)<60000) {
         app.service();TEST_ASSERT_TRUE(app.display_device().healthy());TEST_ASSERT_EQUAL(0,app.touch_device().state().errors);
-        if(uint32_t(millis()-last_turn)>=1000) {
-            last_turn=millis();if(app.displayed_page()+1<app.page_count()) app.next_page();else app.previous_page();
-            app.service();TEST_ASSERT_TRUE_MESSAGE(app.error().empty(),app.error().c_str());++turns;
+        TEST_ASSERT_LESS_OR_EQUAL(2,app.cached_page_count());
+        if(turn_pending && app.state()==ReaderApp::State::Reading) {
+            TEST_ASSERT_EQUAL(target,app.displayed_page());TEST_ASSERT_TRUE_MESSAGE(app.error().empty(),app.error().c_str());
+            ++turns;turn_pending=false;
+        }
+        if(!turn_pending && uint32_t(millis()-last_turn)>=1000) {
+            last_turn=millis();turn_pending=true;
+            if(app.displayed_page()+1<app.page_count()) { target=app.displayed_page()+1;app.next_page(); }
+            else { target=app.displayed_page()-1;app.previous_page(); }
+            app.service();
         }
     }
+    if(turn_pending) { wait_page(target);++turns; }
     uint32_t elapsed=millis()-start,frames=app.display_device().frame_count()-last_frames;
     uint32_t final_internal=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
     Serial.printf("READER SOAK RESULT: %u turns, %.2f Hz, internal %u -> %u, PSRAM %u, reading_ms %llu\n",turns,double(frames)*1000/elapsed,initial_internal,final_internal,(unsigned)ESP.getFreePsram(),(unsigned long long)app.statistics().reading_ms);
