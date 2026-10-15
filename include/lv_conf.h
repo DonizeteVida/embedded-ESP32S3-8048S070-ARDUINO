@@ -1,0 +1,27 @@
+#ifndef LV_CONF_H
+#define LV_CONF_H
+
+#define LV_USE_OS LV_OS_NONE
+#define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
+#define LV_MEM_SIZE (64U * 1024U)
+#define LV_COLOR_FORMAT_DEFAULT LV_COLOR_FORMAT_RGB565
+#define LV_USE_DRAW_SW 1
+#define LV_DRAW_SW_SUPPORT_RGB565 1
+// esp_lcd consumes tightly packed rows, including narrow rectangles.
+#define LV_DRAW_BUF_STRIDE_ALIGN 1
+#define LV_DRAW_BUF_ALIGN 64
+#define LV_DEF_REFR_PERIOD 16
+#define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_MONTSERRAT_20 1
+#define LV_FONT_MONTSERRAT_28 1
+#define LV_USE_LOG 1
+#define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
+#define LV_LOG_PRINTF 0
+#define LV_USE_ASSERT_NULL 1
+#define LV_USE_ASSERT_MALLOC 1
+#define LV_ASSERT_USE_CUSTOM_INCLUDE 1
+#define LV_ASSERT_CUSTOM_INCLUDE "lv_assert_handler.h"
+#define LV_BUILD_EXAMPLES 0
+#define LV_BUILD_DEMOS 0
+
+#endif
