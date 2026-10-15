@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include <esp_heap_caps.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_rgb.h>
@@ -251,11 +252,292 @@ extern "C" void display_assert_failed(void)
     display::assert_failed();
 }
 
+// GT911 register protocol from the bundled touch drivers; no vendor config writes.
+namespace touch {
+
+constexpr int kSdaGpio = 19;
+constexpr int kSclGpio = 20;
+constexpr int kResetGpio = 38;
+constexpr int kInterruptGpio = 18; // Shared with audio LRCLK, including during reset.
+constexpr bool kSwapXY = false;
+constexpr bool kInvertX = false;
+constexpr bool kInvertY = false;
+
+struct State {
+    bool available = false;
+    bool pressed = false;
+    uint16_t x = 0;
+    uint16_t y = 0;
+    uint32_t presses = 0;
+    uint32_t errors = 0;
+};
+
+namespace {
+
+constexpr uint16_t kProductIdRegister = 0x8140;
+constexpr uint16_t kResolutionRegister = 0x8048;
+constexpr uint16_t kStatusRegister = 0x814e;
+constexpr uint16_t kPointsRegister = 0x814f;
+constexpr uint8_t kMaxContacts = 5;
+constexpr uint32_t kStalePressMs = 150;
+uint8_t address = 0;
+uint8_t active_id = 0xff;
+uint16_t raw_width = 0;
+uint16_t raw_height = 0;
+uint32_t last_report_ms = 0;
+State current;
+lv_indev_t *input = nullptr;
+
+uint16_t little_endian(const uint8_t *bytes)
+{
+    return static_cast<uint16_t>(bytes[0]) | (static_cast<uint16_t>(bytes[1]) << 8);
+}
+
+bool read_register(uint16_t reg, uint8_t *bytes, size_t length)
+{
+    Wire.beginTransmission(address);
+    Wire.write(static_cast<uint8_t>(reg >> 8));
+    Wire.write(static_cast<uint8_t>(reg));
+    if (Wire.endTransmission(false) != 0) {
+        return false;
+    }
+    const size_t received = Wire.requestFrom(address, length, true);
+    if (received != length) {
+        while (Wire.available()) {
+            Wire.read();
+        }
+        return false;
+    }
+    for (size_t i = 0; i < length; ++i) {
+        bytes[i] = static_cast<uint8_t>(Wire.read());
+    }
+    return true;
+}
+
+bool acknowledge_report()
+{
+    Wire.beginTransmission(address);
+    Wire.write(static_cast<uint8_t>(kStatusRegister >> 8));
+    Wire.write(static_cast<uint8_t>(kStatusRegister));
+    Wire.write(static_cast<uint8_t>(0));
+    return Wire.endTransmission() == 0;
+}
+
+bool detect(char *product)
+{
+    const uint8_t candidates[] = {0x5d, 0x14};
+    for (uint8_t candidate : candidates) {
+        address = candidate;
+        if (read_register(kProductIdRegister, reinterpret_cast<uint8_t *>(product), 4) &&
+            product[0] == '9' && product[1] == '1' && product[2] == '1') {
+            product[4] = '\0';
+            return true;
+        }
+    }
+    address = 0;
+    return false;
+}
+
+void release()
+{
+    if (current.pressed) {
+        Serial.printf("Touch up: %u,%u\n", current.x, current.y);
+    }
+    current.pressed = false;
+    active_id = 0xff;
+}
+
+void read_error()
+{
+    ++current.errors;
+    release();
+    static uint32_t last_log_ms = 0;
+    if (current.errors == 1 || static_cast<uint32_t>(millis() - last_log_ms) >= 5000) {
+        Serial.printf("Touch: invalid report or I2C failure (%lu total)\n",
+                      static_cast<unsigned long>(current.errors));
+        last_log_ms = millis();
+    }
+}
+
+bool map_point(uint16_t x, uint16_t y, lv_point_t &point)
+{
+    // Reject corrupt coordinates rather than turning them into edge presses.
+    if (x >= raw_width || y >= raw_height) {
+        return false;
+    }
+    uint16_t width = raw_width;
+    uint16_t height = raw_height;
+    if (kSwapXY) {
+        const uint16_t old_x = x;
+        x = y;
+        y = old_x;
+        width = raw_height;
+        height = raw_width;
+    }
+    point.x = static_cast<uint32_t>(x) * (display::kWidth - 1) / (width - 1);
+    point.y = static_cast<uint32_t>(y) * (display::kHeight - 1) / (height - 1);
+    if (kInvertX) {
+        point.x = display::kWidth - 1 - point.x;
+    }
+    if (kInvertY) {
+        point.y = display::kHeight - 1 - point.y;
+    }
+    return true;
+}
+
+void read(lv_indev_t *, lv_indev_data_t *data)
+{
+    uint8_t status = 0;
+    if (!read_register(kStatusRegister, &status, 1)) {
+        read_error();
+    } else if ((status & 0x80) != 0) {
+        const uint8_t count = status & 0x0f;
+        uint8_t points[kMaxContacts * 8] = {};
+        bool valid = count <= kMaxContacts;
+        if (valid && count != 0) {
+            valid = read_register(kPointsRegister, points, count * 8);
+        }
+        // Only clear a ready report, including empty releases or malformed packets.
+        const bool acknowledged = acknowledge_report();
+        if (!valid || !acknowledged) {
+            read_error();
+        } else if (count == 0) {
+            release();
+            last_report_ms = millis();
+        } else {
+            // Follow one contact ID so reordered multi-touch packets cannot jump it.
+            const uint8_t wanted = current.pressed ? active_id : points[0];
+            const uint8_t *selected = nullptr;
+            for (uint8_t i = 0; i < count; ++i) {
+                if (points[i * 8] == wanted) {
+                    selected = &points[i * 8];
+                    break;
+                }
+            }
+            lv_point_t point;
+            if (selected == nullptr) {
+                release();
+            } else if (!map_point(little_endian(selected + 1),
+                                  little_endian(selected + 3), point)) {
+                read_error();
+            } else {
+                current.x = point.x;
+                current.y = point.y;
+                if (!current.pressed) {
+                    ++current.presses;
+                    Serial.printf("Touch down: %u,%u (id %u)\n", current.x, current.y, wanted);
+                }
+                current.pressed = true;
+                active_id = wanted;
+            }
+            last_report_ms = millis();
+        }
+    } else if (current.pressed &&
+               static_cast<uint32_t>(millis() - last_report_ms) >= kStalePressMs) {
+        // A lost release or disconnected controller must not leave LVGL pressed.
+        release();
+    }
+    data->point.x = current.x;
+    data->point.y = current.y;
+    data->state = current.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->continue_reading = false;
+}
+
+} // namespace
+
+bool begin()
+{
+    if (!Wire.begin(kSdaGpio, kSclGpio, 100000)) {
+        Serial.print("Touch unavailable: cannot initialize I2C\n");
+        return false;
+    }
+    Wire.setTimeOut(20);
+    char product[5] = {};
+    // The music example uses an already-running controller without reset/config writes.
+    if (!detect(product)) {
+        // Fallback to the TAMC reset sequence with real INT GPIO18, never uint8_t(-1).
+        pinMode(kInterruptGpio, OUTPUT);
+        pinMode(kResetGpio, OUTPUT);
+        digitalWrite(kInterruptGpio, LOW); // Select 7-bit address 0x5d.
+        digitalWrite(kResetGpio, LOW);
+        delay(10);
+        digitalWrite(kResetGpio, HIGH);
+        delay(5);
+        digitalWrite(kInterruptGpio, LOW);
+        delay(50);
+        pinMode(kInterruptGpio, INPUT);
+        delay(50);
+        if (!detect(product)) {
+            Serial.print("Touch unavailable: GT911 not found at 0x5d or 0x14; display remains usable\n");
+            return false;
+        }
+    }
+    uint8_t resolution[4] = {};
+    if (!read_register(kResolutionRegister, resolution, sizeof(resolution))) {
+        Serial.print("Touch unavailable: cannot read controller resolution\n");
+        return false;
+    }
+    raw_width = little_endian(resolution);
+    raw_height = little_endian(resolution + 2);
+    if (raw_width < 2 || raw_height < 2 || raw_width > 4096 || raw_height > 4096 ||
+        !acknowledge_report()) {
+        Serial.print("Touch unavailable: invalid resolution or status acknowledgement\n");
+        return false;
+    }
+    input = lv_indev_create();
+    if (input == nullptr) {
+        Serial.print("Touch unavailable: cannot allocate LVGL pointer\n");
+        return false;
+    }
+    lv_indev_set_type(input, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_display(input, lv_display_get_default());
+    lv_indev_set_read_cb(input, read);
+    lv_timer_set_period(lv_indev_get_read_timer(input), 16);
+    current.available = true;
+    Serial.printf("Touch: GT911 %.4s at 0x%02x, SDA%d/SCL%d, raw %ux%u, polling 16 ms\n",
+                  product, address, kSdaGpio, kSclGpio, raw_width, raw_height);
+    return true;
+}
+
+State state()
+{
+    return current;
+}
+
+} // namespace touch
+
 // Validation UI, diagnostics, and application lifecycle.
 namespace app {
 namespace {
 
 bool running = false;
+lv_obj_t *touch_status = nullptr;
+lv_obj_t *touch_marker = nullptr;
+uint32_t tap_count = 0;
+
+void tap_clicked(lv_event_t *event)
+{
+    lv_obj_t *caption = static_cast<lv_obj_t *>(lv_event_get_user_data(event));
+    lv_label_set_text_fmt(caption, "Tap test: %lu", static_cast<unsigned long>(++tap_count));
+    Serial.printf("Tap test clicked: %lu\n", static_cast<unsigned long>(tap_count));
+}
+
+void update_touch(lv_timer_t *)
+{
+    const touch::State state = touch::state();
+    if (!state.available) {
+        lv_label_set_text(touch_status, "Touch unavailable - see serial");
+        return;
+    }
+    lv_label_set_text_fmt(touch_status, "Touch: %s %u,%u | presses %lu | errors %lu",
+                          state.pressed ? "DOWN" : "UP", state.x, state.y,
+                          static_cast<unsigned long>(state.presses),
+                          static_cast<unsigned long>(state.errors));
+    lv_obj_set_hidden(touch_marker, !state.pressed);
+    if (state.pressed) {
+        lv_obj_set_pos(touch_marker, state.x - 5, state.y - 5);
+    }
+}
 
 lv_obj_t *label(lv_obj_t *parent, const char *text, int x, int y,
                 const lv_font_t *font, uint32_t color)
@@ -358,6 +640,19 @@ void create_validation_screen()
     lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
     lv_anim_start(&animation);
 
+    lv_obj_t *button = lv_button_create(screen);
+    lv_obj_set_pos(button, 542, 326);
+    lv_obj_set_size(button, 222, 52);
+    lv_obj_t *caption = label(button, "Tap test: 0", 0, 0, &lv_font_montserrat_20, 0xffffff);
+    lv_obj_center(caption);
+    lv_obj_add_event_cb(button, tap_clicked, LV_EVENT_CLICKED, caption);
+    touch_status = label(screen, "", 36, 430, &lv_font_montserrat_14, 0xcbd5e1);
+    touch_marker = rectangle(lv_layer_top(), 0, 0, 10, 10, 0xffb020);
+    lv_obj_set_style_radius(touch_marker, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_hidden(touch_marker, true);
+    update_touch(nullptr);
+    lv_timer_create(update_touch, 50, nullptr);
+
     // Draw on the top layer so the exact last row/column remain visible.
     lv_obj_t *perimeter = rectangle(lv_layer_top(), 0, 0, display::kWidth, display::kHeight, 0);
     lv_obj_set_style_bg_opa(perimeter, LV_OPA_TRANSP, 0);
@@ -393,6 +688,7 @@ void begin()
     if (!display::begin()) {
         return;
     }
+    touch::begin(); // A missing touch controller does not disable the display.
     create_validation_screen();
     running = display::show();
 }

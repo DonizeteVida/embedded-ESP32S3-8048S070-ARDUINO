@@ -14,13 +14,16 @@ is not required just to understand the project.
 | Vendor-documented | Shown in the supplied specifications, schematics, datasheets, or examples; actual board population may differ. |
 | Unverified | Requires checking the physical board or running a hardware test. |
 
-The physical PCB revision, exact module ordering code, touch variant, and fitted
-peripherals are **unverified**. Rendering with the earlier 25 MHz demo is
+The physical PCB revision, exact module ordering code, and other fitted
+peripherals are **unverified**. The touch controller identifies as GT911 over I2C
+at 0x5D with an 800 x 480 configured coordinate range; real tap/release events
+and tap-button clicks were observed. Rendering with the earlier 25 MHz demo is
 user-confirmed. The current LVGL firmware has been flashed and inspected on
 the board. Visible row drift appeared at 20/25/33 MHz; the current target is
 16 MHz. The layout and animation can be assessed through camera captures,
 but reflection and the oblique camera angle limit precise color/contrast
-assessment. Touch, SD, audio, and wireless operation remain unverified.
+assessment. Touch detection, tap/release events, and button clicks are hardware-observed;
+full corner/drag alignment checks remain open. SD, audio, and wireless remain unverified.
 
 Vendor setup instructions are reference material, not instructions for this
 repository. The existing PlatformIO configuration remains the software baseline.
@@ -82,8 +85,8 @@ filename says V1.0 while its title block says V0.1; retain that source ambiguity
 ## Current display implementation
 
 Sources: [firmware implementation](../src/main.cpp) (`display` namespace for
-configuration and the LVGL adapter; `app` namespace for the validation screen
-and diagnostics) and [LVGL configuration](../include/lv_conf.h). All application
+configuration and the LVGL adapter; `touch` for GT911 input; `app` for
+the validation screen and diagnostics) and [LVGL configuration](../include/lv_conf.h). All application
 implementation lives in `main.cpp`; LVGL configuration and the C assertion
 bridge declaration remain in headers because LVGL compiles separately.
 Arduino uses the native ESP-IDF `esp_lcd` RGB panel driver with LVGL 9.6.0
@@ -217,7 +220,8 @@ backlight, print an error, and abort instead of silently hanging.
 
 The main sketch creates six RGB/white/black/gray swatches, three channel gradients,
 four corner labels, a one-pixel perimeter, uptime, and an endlessly reversing
-progress bar. `display::show()` forces the initial LVGL render, then waits for a
+progress bar. The touch-enabled screen adds a tap-count button, coordinates,
+press/error counts, and an orange pointer marker. `display::show()` forces the initial LVGL render, then waits for a
 scanout frame boundary before enabling backlight. Missing frame interrupts cause
 a reported failure after 250 ms; the backlight stays off.
 
@@ -248,7 +252,9 @@ future UI objects/layers rather than treating this as the entire memory budget.
 
 ## Peripheral wiring
 
-All entries below are vendor-documented and untested in the current project.
+The wiring tables below are vendor-documented. The current GT911 detection
+and configuration have also been checked on the connected board; the remaining
+peripherals are untested in the current project.
 
 ### Capacitive touch / GT911 examples
 
@@ -260,7 +266,7 @@ All entries below are vendor-documented and untested in the current project.
 | Interrupt | 18 through MCU R17, 0 ohm, to TP_INT | LCM FPC1 contact 5; vendor examples instead pass `INT = -1` and poll |
 | Supply | 3.3 V / GND | FPC1 contacts 6 / 1; schematic also shows grounded symbol pads 7/8 |
 | I2C pull-ups | 4.7 kohm to 3.3 V | LCM R3/R4 |
-| Example address | 7-bit 0x5D default; 0x14 alternative | Bundled GT911 driver headers; actual responding address unverified |
+| Address | 7-bit 0x5D default; 0x14 alternative | Bundled GT911 headers; this board responded at 0x5D with product ID `911` |
 | Example screen size | 800 x 480 | Widgets `touch.h` lines 19-29 |
 
 Sources: [MCU V1.1][mcu11], Extended IO block R17 immediately above P3;
@@ -282,6 +288,60 @@ lines 5-29. Both drivers invert coordinates for their `ROTATION_NORMAL` setting;
 wrappers also reverse mapping endpoints. Validate corner coordinates and axis
 direction rather than assuming that the name implies unchanged coordinates.
 Samples pass only the first touch point to LVGL, despite five-point driver arrays.
+
+### Current GT911 implementation
+
+The `touch` namespace in [main.cpp](../src/main.cpp) implements the register
+protocol from the [music driver][touch-driver] and [TAMC driver][tamc], using
+Arduino Wire directly; no additional library dependency is needed. The LVGL
+adapter targets the pinned 9.6 API rather than the vendor LVGL 8 wrappers.
+
+| Setting | Current behavior |
+| --- | --- |
+| Bus | Wire/I2C0, SDA19, SCL20, 100 kHz, 20 ms transaction timeout |
+| Detection | Read product ID at 0x8140; accept `911`; try 0x5D then 0x14 |
+| Reset | First try the already-running controller, as in the music example. If neither address identifies, hold INT18/RST38 LOW for 10 ms, raise RST, wait 5 ms, keep INT LOW for 50 ms, return INT to INPUT, wait 50 ms, and probe again. |
+| Resolution | Read little-endian X/Y limits from 0x8048-0x804B; reject invalid limits. Do not overwrite the vendor configuration/checksum. |
+| LVGL input | One `LV_INDEV_TYPE_POINTER`, attached to the current display; read timer 16 ms on the Arduino task, with no touch ISR |
+| Reports | Read ready bit and contact count at 0x814E; accept up to five 8-byte contact records starting at 0x814F; acknowledge ready reports by writing zero to 0x814E |
+| Selection | Follow one contact ID across reordered packets; release when that ID disappears. Another remaining finger may become the pointer on a subsequent report. No LVGL multi-touch gestures are exposed. |
+| Coordinates | Scale valid raw indices 0..limit-1 into 0..799 / 0..479. `kSwapXY`, `kInvertX`, and `kInvertY` currently false; vendor driver inversion plus wrapper reverse mapping cancel out. |
+| Errors/releases | Reject short transfers, failed acknowledgements, invalid counts/coordinates; release on errors. Retain the last state between reports but release after 150 ms without a fresh report. Log errors at a limited rate and recover on later valid reports. |
+| Missing controller | Log the initialization failure and keep the display/demo usable without an input device |
+
+Only ready-report acknowledgements are written during normal operation;
+configuration and controller flash are left intact. Unlike the TAMC example,
+`-1` is never converted to an unsigned GPIO number. The fallback reset drives
+the real GPIO18; polling does **not** make that signal safe to share with audio.
+SDA19/SCL20 also remain unavailable for native USB. Resistive touch and other
+controller families are not implemented.
+
+The report format was cross-checked against
+[Espressif's GT911 driver](https://github.com/espressif/esp-bsp/blob/master/components/lcd_touch/esp_lcd_touch_gt911/esp_lcd_touch_gt911.c).
+That is protocol reference material; the project keeps its Arduino/Wire workflow.
+
+On 2026-10-15 the new firmware was built and uploaded through CH340C. Serial
+identified `GT911 911 at 0x5d`, raw 800 x 480. The user touched the screen: serial
+recorded seven down/up sequences and seven tap-button clicks; a camera capture
+showed `Tap test: 7`, released state, seven presses, and zero errors. Full
+corner alignment and drag-following are not yet verified. Reset fallback is
+host-tested but was not needed on this boot. Serial sampling continued for
+about two minutes with constant free-memory readings and no touch errors.
+The host serial reader then reported a disconnect or competing reader; a
+subsequent camera frame still showed the UI running at 135 seconds uptime
+with seven clicks and zero errors. This was not a new ten-minute touch test.
+
+A temporary host harness linked the actual `main.cpp` and LVGL 9.6 against
+simulated Wire/Arduino/LCD functions. All 18 scenarios passed: the previous nine
+display cases plus touch packet handling, real LVGL button press/release and
+outside-button taps, alternate address, fallback reset, missing I2C bus,
+missing controller, incorrect product ID, failed configuration read, and invalid
+resolution. Packet checks covered all edges, reordered contacts, release and
+stale state, oversized counts, invalid coordinates, short reads, I2C/ack failures,
+and recovery. These tests do not measure electrical bus timing or physical
+orientation. Build usage: 85,752 bytes static RAM; 673,049 bytes flash. The
+existing display clock, memory allocation, partitions, and dependencies remain
+unchanged.
 
 ### SPI microSD / TF
 
@@ -458,8 +518,8 @@ Software verification on 2026-10-15:
   Runtime buffer allocations are additional to the static RAM figure.
 - After consolidating the implementation into `main.cpp`, the PlatformIO build
   and all nine host scenarios passed again. Static RAM remained 85,384 bytes;
-  flash was 643,389 bytes. This structural refactor was not uploaded; the
-  hardware recordings and serial logs describe the earlier 16 MHz image.
+  flash was 643,389 bytes. That software check preceded the touch-enabled
+  upload; the original ten-minute recordings describe the earlier 16 MHz image.
 - A temporary host harness linked the actual application/display sources and
   LVGL 9.6.0 against simulated Arduino/LCD/allocation functions. Nine scenarios
   passed: normal UI rendering/animation and full-screen/final-pixel flushes,
@@ -482,7 +542,9 @@ source, and result for further checks.
 - [x] Run the animated validation screen at 16 MHz for at least ten minutes; serial/camera sampling found no persistent drift, stall, or unexpected reset. Recorded callbacks were close to nominal 28.86 Hz.
 - [ ] Inspect every frame for subtle tearing/flicker with a clear, frontal view; current camera glare limits that assessment.
 - [x] Record total/free PSRAM and internal memory during the validation UI; memory readings stayed constant throughout the run.
-- [ ] Verify touch I2C address, reset behavior, release events, and every corner's axis/orientation; account for the physical GPIO18 IRQ/audio sharing.
+- [x] Detect GT911 at 0x5D and verify real tap/release events and LVGL tap-button clicks.
+- [ ] Verify touch cold-start/fallback reset, held/dragged and multi-finger behavior,
+  and every corner's axis/orientation; account for the physical GPIO18 IRQ/audio sharing.
 - [ ] Mount a known card in SPI mode, test read/write, and check absent-card/mount-failure handling.
 - [ ] Confirm audio BCLK against PCB revision and account for GPIO0 BOOT or GPIO19 touch sharing before driving it; test speaker output and USB-powered versus VIN-only behavior.
 - [x] Verify serial output at 115200 through CH340C and automatic upload/reset behavior.

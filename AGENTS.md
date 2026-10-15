@@ -12,8 +12,8 @@ shared pins, and open questions.
 
 - `src/main.cpp`: all application implementation. The `display` namespace owns
   native ESP-IDF `esp_lcd` RGB configuration, LVGL registration, backlight
-  sequencing, and the frame counter; `app` owns the validation UI, diagnostics,
-  and lifecycle. Global Arduino `setup()`/`loop()` delegate to `app`.
+  sequencing, and the frame counter; `touch` owns GT911 I2C and LVGL pointer
+  input; `app` owns the validation UI, diagnostics, and lifecycle. Global Arduino `setup()`/`loop()` delegate to `app`.
 - `include/lv_conf.h`, `include/lv_assert_handler.h`: LVGL 9.6 configuration
   and the C assertion bridge declaration used by LVGL library sources. The
   assertion implementation stays in `main.cpp`; it logs, disables backlight,
@@ -41,6 +41,13 @@ shared pins, and open questions.
 - LVGL calls belong on the Arduino loop task. The RGB ISR only counts frames;
   flush completion follows the synchronous framebuffer copy, not VSYNC.
   Preserve tightly packed RGB565 rows and inclusive-to-exclusive area conversion.
+- GT911 uses Wire on SDA19/SCL20 at 100 kHz and LVGL polling every 16 ms.
+  Probe 0x5D/0x14 without rewriting controller configuration. Fallback reset
+  uses GPIO38 and briefly drives GPIO18, then returns GPIO18 to input; do not
+  combine this with audio LRCLK. Native USB also shares SDA/SCL. Keep all I2C
+  and LVGL input work on the Arduino task. Preserve checked reads, bounded
+  contact counts, explicit release handling, and the 150 ms stale-press timeout.
+  Touch orientation settings live in `touch` and require physical corner tests.
 - Check pin ownership and shared buses in the hardware reference before adding
   touch, SD, audio, I²C, or connector features. A GPIO exposed on a connector is
   not necessarily free. Distinguish the actual board variant from alternatives
