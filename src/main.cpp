@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <SD.h>
+#include <SPI.h>
 #include <esp_heap_caps.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_rgb.h>
@@ -506,6 +508,81 @@ State state()
 
 } // namespace touch
 
+// Onboard SPI microSD socket; independent of RGB and capacitive touch.
+namespace sdcard {
+namespace {
+constexpr int kCsGpio = 10;
+constexpr int kMosiGpio = 11;
+constexpr int kSckGpio = 12;
+constexpr int kMisoGpio = 13;
+constexpr uint32_t kFrequencyHz = 1000000;
+constexpr unsigned kMaxRootEntries = 16;
+bool mounted = false;
+char status[96] = "SD: unavailable - see serial";
+
+void stop()
+{
+    SD.end();
+    SPI.end();
+    digitalWrite(kCsGpio, HIGH);
+    mounted = false;
+}
+} // namespace
+
+bool begin()
+{
+    if (mounted) {
+        return true;
+    }
+    pinMode(kCsGpio, OUTPUT);
+    digitalWrite(kCsGpio, HIGH);
+    SPI.begin(kSckGpio, kMisoGpio, kMosiGpio, kCsGpio);
+    // Never format an unrecognized filesystem. No internal flash partition needed.
+    if (!SD.begin(kCsGpio, SPI, kFrequencyHz, "/sd", 5, false) ||
+        SD.cardType() == CARD_NONE) {
+        Serial.println("SD unavailable: no card or mount failed; insert a FAT-formatted card and reboot");
+        stop();
+        return false;
+    }
+    File root = SD.open("/", FILE_READ);
+    if (!root || !root.isDirectory()) {
+        Serial.println("SD unavailable: cannot read root directory");
+        root.close();
+        stop();
+        return false;
+    }
+    mounted = true;
+    const uint8_t type = SD.cardType();
+    const char *name = type == CARD_MMC ? "MMC" : type == CARD_SD ? "SDSC" :
+                       type == CARD_SDHC ? "SDHC/SDXC" : "unknown";
+    const unsigned long capacity_mib = static_cast<unsigned long>(SD.cardSize() / (1024 * 1024));
+    snprintf(status, sizeof(status), "SD: %s | %lu MiB | SPI 1 MHz", name, capacity_mib);
+    Serial.printf("%s; CS%d/MOSI%d/SCK%d/MISO%d, mounted at /sd\n", status,
+                  kCsGpio, kMosiGpio, kSckGpio, kMisoGpio);
+    Serial.println("SD root (up to 16 entries):");
+    unsigned count = 0;
+    for (; count < kMaxRootEntries; ++count) {
+        File entry = root.openNextFile(FILE_READ);
+        if (!entry) {
+            break;
+        }
+        Serial.printf("  %s %s (%lu bytes)\n", entry.isDirectory() ? "DIR " : "FILE",
+                      entry.name(), static_cast<unsigned long>(entry.size()));
+        entry.close();
+    }
+    if (count == kMaxRootEntries) {
+        Serial.println("  Listing limit reached");
+    }
+    root.close();
+    return true;
+}
+
+const char *status_text()
+{
+    return status;
+}
+} // namespace sdcard
+
 // Validation UI, diagnostics, and application lifecycle.
 namespace app {
 namespace {
@@ -598,6 +675,7 @@ void create_validation_screen()
              static_cast<double>(display::kPixelClockHz) / 1000000.0,
              static_cast<double>(display::kPixelClockHz) / 1056 / 525);
     label(screen, timing, 36, 92, &lv_font_montserrat_14, 0x94a3b8);
+    label(screen, sdcard::status_text(), 36, 114, &lv_font_montserrat_14, 0xcbd5e1);
 
     const uint32_t colors[] = {0xff0000, 0x00ff00, 0x0000ff, 0xffffff, 0x000000, 0x808080};
     const char *names[] = {"RED", "GREEN", "BLUE", "WHITE", "BLACK", "GRAY"};
@@ -689,6 +767,7 @@ void begin()
         return;
     }
     touch::begin(); // A missing touch controller does not disable the display.
+    sdcard::begin(); // Optional storage; mount failure leaves the demo usable.
     create_validation_screen();
     running = display::show();
 }

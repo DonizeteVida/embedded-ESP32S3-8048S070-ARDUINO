@@ -359,6 +359,35 @@ with `SD.begin(SD_CS, SPI, 1000000)` and handles mount failure/no card. Its main
 sketch comments out a direct initialization call, so presence of that sketch
 does not prove SD operation. This evidence describes SPI mode, not an SDMMC pinout.
 
+### Current SD implementation
+
+The `sdcard` namespace in [main.cpp](../src/main.cpp) initializes Arduino's
+built-in `SPI` and `SD` libraries on CS10/MOSI11/SCK12/MISO13 at 1 MHz.
+This is project-configured from the vendor wiring and example, **not yet
+physically verified**. It does not change display timing or touch configuration.
+GPIO11-13 remain shared with P2 and the optional resistive-touch alternative;
+do not attach an independently driven bus to those contacts.
+
+Insert a FAT16/FAT32-formatted card before power-on/reset. Boot attempts one
+mount at `/sd` with formatting disabled, checks that the root directory opens,
+and logs card type/capacity plus up to 16 root entries without recursion.
+The validation screen displays the mount result. Missing cards, unsupported
+filesystems, and mount/root-open failures release the SD/SPI resources and
+leave the display and capacitive touch usable. Boot diagnostics read directory
+metadata only; they do not create, overwrite, or delete files.
+
+After successful initialization, application code on the Arduino task can use
+the standard `SD.open("/filename", FILE_READ)` or `FILE_WRITE` APIs and must
+check open/read/write results and close files. Arduino SD paths are relative
+to the card root; `/sd` is the VFS mount point. No new dependency or internal
+flash partition is required for this external filesystem. File writes and
+LVGL filesystem/image integration are not exercised by this boot demonstration.
+
+There is no wired card-detect input or hot-plug service. The status is a boot
+snapshot; power off before swapping cards and reboot to remount. Physical
+validation still needs a known card, absent/unsupported-card boots, file
+read/write verification, and display/touch stability checks during SD activity.
+
 ### I2S audio and speaker
 
 | Signal | GPIO / connection |
